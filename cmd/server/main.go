@@ -2,25 +2,20 @@ package main
 
 import (
 	"log"
-	"net/http"
 
-	"github.com/astre-ash/omnigo/internal/handler"
+	"github.com/astre-ash/omnigo/internal/server"
 	"github.com/astre-ash/omnigo/internal/storage"
 )
+
+const defaultAddr = "127.0.0.1:8080"
 
 func main() {
 
 	memStorage := storage.NewMemStorage()
-	updateHandler := handler.NewUpdateHandler(memStorage)
 
-	mux := http.NewServeMux()
-	mux.Handle("/update/", updateHandler)
+	srv := server.NewServer(defaultAddr, memStorage)
 
-	const addr = "localhost:8080"
-	log.Printf("server is starting on %s\n", addr)
-
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("failed to start server: %v\n", err)
+	if err := srv.Run(); err != nil {
+		log.Fatalf("failed to run server: %v\n", err)
 	}
-
 }
