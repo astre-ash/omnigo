@@ -7,7 +7,7 @@ import (
 	"github.com/astre-ash/omnigo/internal/storage"
 )
 
-const defaultAddr = "http://127.0.0.1:8080"
+const defaultAddr = "localhost:8080"
 
 func main() {
 
