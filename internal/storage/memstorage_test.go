@@ -8,6 +8,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewMemStorage(t *testing.T) {
+	s := NewMemStorage()
+	require.NotNil(t, s)
+	assert.NotNil(t, s.gauges)
+	assert.NotNil(t, s.counters)
+}
+
 func TestMemStorage_Gauge(t *testing.T) {
 	s := NewMemStorage()
 
@@ -62,6 +69,80 @@ func TestMemStorage_Counter(t *testing.T) {
 	})
 }
 
+func TestMemStorage_GetAllGauges(t *testing.T) {
+	s := NewMemStorage()
+
+	t.Run("empty storage", func(t *testing.T) {
+		gauges := s.GetAllGauges()
+		require.NotNil(t, gauges)
+		assert.Empty(t, gauges)
+	})
+
+	t.Run("returns all gauges", func(t *testing.T) {
+		expected := map[string]float64{
+			"cpu_load": 12.34,
+			"ram_free": 1024.5,
+		}
+
+		for k, v := range expected {
+			s.UpdateGauge(k, v)
+		}
+
+		gauges := s.GetAllGauges()
+		assert.Equal(t, expected, gauges)
+	})
+
+	t.Run("returned map is an isolated copy", func(t *testing.T) {
+		gauges := s.GetAllGauges()
+		gauges["cpu_load"] = 0.0
+		gauges["external_metric"] = 999.9
+
+		val, ok := s.GetGauge("cpu_load")
+		require.True(t, ok)
+		assert.Equal(t, 12.34, val)
+
+		_, ok = s.GetGauge("external_metric")
+		assert.False(t, ok, "external modifications should not affect storage")
+	})
+}
+
+func TestMemStorage_GetAllCounters(t *testing.T) {
+	s := NewMemStorage()
+
+	t.Run("empty storage", func(t *testing.T) {
+		counters := s.GetAllCounters()
+		require.NotNil(t, counters)
+		assert.Empty(t, counters)
+	})
+
+	t.Run("returns all counters", func(t *testing.T) {
+		s.UpdateCounter("poll_count", 5)
+		s.UpdateCounter("poll_count", 5)
+		s.UpdateCounter("requests", 42)
+
+		expected := map[string]int64{
+			"poll_count": 10,
+			"requests":   42,
+		}
+
+		counters := s.GetAllCounters()
+		assert.Equal(t, expected, counters)
+	})
+
+	t.Run("returned map is an isolated copy", func(t *testing.T) {
+		counters := s.GetAllCounters()
+		counters["requests"] = 99999
+		counters["external_counter"] = 1
+
+		val, ok := s.GetCounter("requests")
+		require.True(t, ok)
+		assert.Equal(t, int64(42), val)
+
+		_, ok = s.GetCounter("external_counter")
+		assert.False(t, ok, "external modifications should not affect storage")
+	})
+}
+
 func TestMemStorage_Concurrent(t *testing.T) {
 	s := NewMemStorage()
 
@@ -89,6 +170,11 @@ func TestMemStorage_Concurrent(t *testing.T) {
 				s.UpdateGauge("temperature", float64(id+j))
 				_, _ = s.GetGauge("temperature")
 				_, _ = s.GetCounter("requests")
+
+				if j%100 == 0 {
+					_ = s.GetAllGauges()
+					_ = s.GetAllCounters()
+				}
 			}
 		}(i)
 	}

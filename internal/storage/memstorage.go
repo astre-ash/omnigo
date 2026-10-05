@@ -43,3 +43,25 @@ func (s *MemStorage) GetCounter(name string) (int64, bool) {
 	val, ok := s.counters[name]
 	return val, ok
 }
+
+func (s *MemStorage) GetAllGauges() map[string]float64 {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	copyMap := make(map[string]float64, len(s.gauges))
+	for k, v := range s.gauges {
+		copyMap[k] = v
+	}
+	return copyMap
+}
+
+func (s *MemStorage) GetAllCounters() map[string]int64 {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+
+	copyMap := make(map[string]int64, len(s.counters))
+	for k, v := range s.counters {
+		copyMap[k] = v
+	}
+	return copyMap
+}

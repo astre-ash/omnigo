@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
 	"github.com/astre-ash/omnigo/internal/domain"
 	"github.com/astre-ash/omnigo/internal/handler"
 )
@@ -35,12 +38,22 @@ func NewServer(addr string, storage domain.MetricStorage) *Server {
 }
 
 func (s *Server) setupRoutes() http.Handler {
-	mux := http.NewServeMux()
+	r := chi.NewRouter()
 
-	updateHandler := handler.NewUpdateHandler(s.storage)
-	mux.Handle("/update/", updateHandler)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
 
-	return mux
+	h := handler.NewMericHandler(s.storage)
+
+	r.Get("/", h.GetAll)
+	r.Route("/update", func(r chi.Router) {
+		r.Post("/{type}/{name}/{value}", h.Update)
+	})
+	r.Route("/value", func(r chi.Router) {
+		r.Get("/{type}/{name}", h.GetValue)
+	})
+
+	return r
 }
 
 func (s *Server) Run() error {
