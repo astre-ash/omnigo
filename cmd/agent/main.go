@@ -7,12 +7,7 @@ import (
 	"time"
 
 	"github.com/astre-ash/omnigo/internal/agent"
-)
-
-const (
-	serverAddr     = "http://127.0.0.1:8080"
-	pollInterval   = 2 * time.Second
-	reportInterval = 10 * time.Second
+	"github.com/astre-ash/omnigo/internal/config"
 )
 
 func main() {
@@ -20,13 +15,15 @@ func main() {
 		syscall.SIGTERM)
 	defer stop()
 
+	rawCfg := config.LoadAgentConfig()
+
 	cfg := agent.AgentConfig{
-		PollInterval:   pollInterval,
-		ReportInterval: reportInterval,
+		PollInterval:   time.Duration(rawCfg.PollInterval) * time.Second,
+		ReportInterval: time.Duration(rawCfg.ReportInterval) * time.Second,
 	}
 
 	collertor := agent.NewCollector()
-	sender := agent.NewMetricSender(serverAddr)
+	sender := agent.NewMetricSender(rawCfg.Address)
 
 	app := agent.NewAgent(cfg, collertor, sender)
 	app.Run(ctx)
