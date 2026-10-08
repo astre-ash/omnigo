@@ -7,36 +7,34 @@ import (
 )
 
 type Sender interface {
-	SendAll(metrics []MetricData)
-}
-
-type AgentConfig struct {
-	PollInterval   time.Duration
-	ReportInterval time.Duration
+	SendAll(metrics []MetricData) error
 }
 
 type Agent struct {
-	cfg       AgentConfig
+	pollInterval   time.Duration
+	reportInterval time.Duration
+
 	collector *Collector
 	sender    Sender
 }
 
-func NewAgent(cfg AgentConfig, collector *Collector, sender Sender) *Agent {
+func NewAgent(pollInterval time.Duration, reportInterval time.Duration, collector *Collector, sender Sender) *Agent {
 	return &Agent{
-		cfg:       cfg,
-		collector: collector,
-		sender:    sender,
+		pollInterval:   pollInterval,
+		reportInterval: reportInterval,
+		collector:      collector,
+		sender:         sender,
 	}
 }
 
 func (a *Agent) Run(ctx context.Context) {
-	pollTicker := time.NewTicker(a.cfg.PollInterval)
+	pollTicker := time.NewTicker(a.pollInterval)
 	defer pollTicker.Stop()
 
-	reportTicker := time.NewTicker(a.cfg.ReportInterval)
+	reportTicker := time.NewTicker(a.reportInterval)
 	defer reportTicker.Stop()
 
-	log.Printf("agent started: poll interval %v, report interval %v", a.cfg.PollInterval, a.cfg.ReportInterval)
+	log.Printf("agent started: poll interval %v, report interval %v", a.pollInterval, a.reportInterval)
 
 	for {
 		select {
@@ -50,7 +48,12 @@ func (a *Agent) Run(ctx context.Context) {
 		case <-reportTicker.C:
 			metrics := a.collector.GetMetrics()
 			log.Printf("reporting %d metrics to server...", len(metrics))
-			a.sender.SendAll(metrics)
+
+			if err := a.sender.SendAll(metrics); err != nil {
+				log.Printf("reporting failed: %v", err)
+			} else {
+				a.collector.ResetPollCount()
+			}
 
 		}
 	}

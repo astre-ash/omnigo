@@ -2,10 +2,12 @@ package storage
 
 import (
 	"sync"
+
+	"github.com/astre-ash/omnigo/internal/domain"
 )
 
 type MemStorage struct {
-	mtx      sync.RWMutex
+	mtx      sync.Mutex
 	gauges   map[string]float64
 	counters map[string]int64
 }
@@ -30,23 +32,29 @@ func (s *MemStorage) UpdateCounter(name string, value int64) {
 	s.counters[name] += value
 }
 
-func (s *MemStorage) GetGauge(name string) (float64, bool) {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
+func (s *MemStorage) GetGauge(name string) (float64, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 	val, ok := s.gauges[name]
-	return val, ok
+	if !ok {
+		return 0, domain.ErrMetricNotFound
+	}
+	return val, nil
 }
 
-func (s *MemStorage) GetCounter(name string) (int64, bool) {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
+func (s *MemStorage) GetCounter(name string) (int64, error) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 	val, ok := s.counters[name]
-	return val, ok
+	if !ok {
+		return 0, domain.ErrMetricNotFound
+	}
+	return val, nil
 }
 
 func (s *MemStorage) GetAllGauges() map[string]float64 {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	copyMap := make(map[string]float64, len(s.gauges))
 	for k, v := range s.gauges {
@@ -56,8 +64,8 @@ func (s *MemStorage) GetAllGauges() map[string]float64 {
 }
 
 func (s *MemStorage) GetAllCounters() map[string]int64 {
-	s.mtx.RLock()
-	defer s.mtx.RUnlock()
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
 
 	copyMap := make(map[string]int64, len(s.counters))
 	for k, v := range s.counters {

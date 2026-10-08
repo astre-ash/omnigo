@@ -15,7 +15,7 @@ type MetricData struct {
 }
 
 type Collector struct {
-	mtx         sync.RWMutex
+	mtx         sync.Mutex
 	pollCount   int64
 	randomValue float64
 	memStats    runtime.MemStats
@@ -35,8 +35,8 @@ func (c *Collector) Poll() {
 }
 
 func (c *Collector) GetMetrics() []MetricData {
-	c.mtx.RLock()
-	defer c.mtx.RUnlock()
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
 
 	metrics := []MetricData{
 		// Gauge runtime metrics (27 items).
@@ -74,4 +74,11 @@ func (c *Collector) GetMetrics() []MetricData {
 	}
 
 	return metrics
+}
+
+func (c *Collector) ResetPollCount() {
+	c.mtx.Lock()
+	defer c.mtx.Unlock()
+
+	c.pollCount = 0
 }

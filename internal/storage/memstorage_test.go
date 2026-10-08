@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/astre-ash/omnigo/internal/domain"
 )
 
 func TestNewMemStorage(t *testing.T) {
@@ -16,69 +18,75 @@ func TestNewMemStorage(t *testing.T) {
 }
 
 func TestMemStorage_Gauge(t *testing.T) {
-	s := NewMemStorage()
-
 	t.Run("gauge not found", func(t *testing.T) {
-		val, ok := s.GetGauge("non_existent")
-		assert.False(t, ok)
+		s := NewMemStorage()
+
+		val, err := s.GetGauge("non_existent")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 		assert.Equal(t, 0.0, val)
 	})
 
 	t.Run("gauge write and overwrite", func(t *testing.T) {
+		s := NewMemStorage()
+
 		// Initial write.
 		s.UpdateGauge("cpu_load", 12.34)
-		val, ok := s.GetGauge("cpu_load")
-		require.True(t, ok, "metric should exist")
+		val, err := s.GetGauge("cpu_load")
+		require.NoError(t, err)
 		assert.Equal(t, 12.34, val)
 
 		// Value replacement.
 		s.UpdateGauge("cpu_load", 99.99)
-		val, ok = s.GetGauge("cpu_load")
-		require.True(t, ok)
+		val, err = s.GetGauge("cpu_load")
+		require.NoError(t, err)
 		assert.Equal(t, 99.99, val)
 	})
 }
 
 func TestMemStorage_Counter(t *testing.T) {
-	s := NewMemStorage()
-
 	t.Run("counter not found", func(t *testing.T) {
-		val, ok := s.GetCounter("non_existent")
-		assert.False(t, ok)
+		s := NewMemStorage()
+
+		val, err := s.GetCounter("non_existent")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 		assert.Equal(t, int64(0), val)
 	})
 
 	t.Run("counter accumulate", func(t *testing.T) {
+		s := NewMemStorage()
+
 		// First icrement.
 		s.UpdateCounter("page_views", 10)
-		val, ok := s.GetCounter("page_views")
-		require.True(t, ok, "metric should exist")
+		val, err := s.GetCounter("page_views")
+		require.NoError(t, err)
 		assert.Equal(t, int64(10), val)
 
 		// Second increment (10 + 5 = 15).
 		s.UpdateCounter("page_views", 5)
-		val, ok = s.GetCounter("page_views")
-		require.True(t, ok)
+		val, err = s.GetCounter("page_views")
+		require.NoError(t, err)
 		assert.Equal(t, int64(15), val)
 
 		// Third increment (15 + 20 = 35).
 		s.UpdateCounter("page_views", 20)
-		val, ok = s.GetCounter("page_views")
-		require.True(t, ok)
+		val, err = s.GetCounter("page_views")
+		require.NoError(t, err)
 		assert.Equal(t, int64(35), val)
 	})
 }
 
 func TestMemStorage_GetAllGauges(t *testing.T) {
-	s := NewMemStorage()
-
 	t.Run("empty storage", func(t *testing.T) {
+		s := NewMemStorage()
+
 		gauges := s.GetAllGauges()
 		require.NotNil(t, gauges)
 		assert.Empty(t, gauges)
 	})
 
 	t.Run("returns all gauges", func(t *testing.T) {
+		s := NewMemStorage()
+
 		expected := map[string]float64{
 			"cpu_load": 12.34,
 			"ram_free": 1024.5,
@@ -93,31 +101,37 @@ func TestMemStorage_GetAllGauges(t *testing.T) {
 	})
 
 	t.Run("returned map is an isolated copy", func(t *testing.T) {
+		s := NewMemStorage()
+
+		s.UpdateGauge("cpu_load", 12.34)
+
 		gauges := s.GetAllGauges()
 		gauges["cpu_load"] = 0.0
 		gauges["external_metric"] = 999.9
 
-		val, ok := s.GetGauge("cpu_load")
-		require.True(t, ok)
+		val, err := s.GetGauge("cpu_load")
+		require.NoError(t, err)
 		assert.Equal(t, 12.34, val)
 
-		_, ok = s.GetGauge("external_metric")
-		assert.False(t, ok, "external modifications should not affect storage")
+		_, err = s.GetGauge("external_metric")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound, "external modifications should not affect storage")
 	})
 }
 
 func TestMemStorage_GetAllCounters(t *testing.T) {
-	s := NewMemStorage()
-
 	t.Run("empty storage", func(t *testing.T) {
+		s := NewMemStorage()
+
 		counters := s.GetAllCounters()
 		require.NotNil(t, counters)
 		assert.Empty(t, counters)
 	})
 
 	t.Run("returns all counters", func(t *testing.T) {
+		s := NewMemStorage()
+
 		s.UpdateCounter("poll_count", 5)
-		s.UpdateCounter("poll_count", 5)
+		s.UpdateCounter("poll_count", 5) // в сумме 10
 		s.UpdateCounter("requests", 42)
 
 		expected := map[string]int64{
@@ -130,16 +144,20 @@ func TestMemStorage_GetAllCounters(t *testing.T) {
 	})
 
 	t.Run("returned map is an isolated copy", func(t *testing.T) {
+		s := NewMemStorage()
+
+		s.UpdateCounter("requests", 42)
+
 		counters := s.GetAllCounters()
 		counters["requests"] = 99999
 		counters["external_counter"] = 1
 
-		val, ok := s.GetCounter("requests")
-		require.True(t, ok)
+		val, err := s.GetCounter("requests")
+		require.NoError(t, err)
 		assert.Equal(t, int64(42), val)
 
-		_, ok = s.GetCounter("external_counter")
-		assert.False(t, ok, "external modifications should not affect storage")
+		_, err = s.GetCounter("external_counter")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound, "external modifications should not affect storage")
 	})
 }
 
@@ -181,7 +199,7 @@ func TestMemStorage_Concurrent(t *testing.T) {
 
 	wg.Wait()
 
-	val, ok := s.GetCounter("requests")
-	require.True(t, ok, "counter 'requests' must exist")
+	val, err := s.GetCounter("requests")
+	require.NoError(t, err, "counter 'requests' must exist")
 	assert.Equal(t, int64(goroutines*iterations), val)
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -35,6 +36,7 @@ func (s *MetricSender) Send(m MetricData) error {
 		return fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -43,10 +45,17 @@ func (s *MetricSender) Send(m MetricData) error {
 	return nil
 }
 
-func (s *MetricSender) SendAll(metrics []MetricData) {
+func (s *MetricSender) SendAll(metrics []MetricData) error {
+	var hasError bool
+
 	for _, m := range metrics {
 		if err := s.Send(m); err != nil {
 			log.Printf("MetricSender: failed to send metric %s (%s): %v", m.Name, m.Type, err)
+			hasError = true
 		}
 	}
+	if hasError {
+		return fmt.Errorf("failed to send one or more metrics")
+	}
+	return nil
 }
