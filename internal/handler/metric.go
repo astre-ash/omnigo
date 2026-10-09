@@ -85,7 +85,6 @@ func (h *MetricHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 func (h *MetricHandler) handleError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrMetricNotFound):
-		log.Printf("INFO: not found: %v", err)
 		http.Error(w, domain.ErrMetricNotFound.Error(), http.StatusNotFound)
 	case errors.Is(err, domain.ErrInvalidValue), errors.Is(err, domain.ErrUnknownMetricType):
 		log.Printf("WARN: bad request: %v", err)

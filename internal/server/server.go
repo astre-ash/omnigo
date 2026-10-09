@@ -8,17 +8,21 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-
-	"github.com/astre-ash/omnigo/internal/handler"
 )
+
+type MetricHandler interface {
+	Update(w http.ResponseWriter, r *http.Request)
+	GetValue(w http.ResponseWriter, r *http.Request)
+	GetAll(w http.ResponseWriter, r *http.Request)
+}
 
 type Server struct {
 	addr       string
 	httpServer *http.Server
-	handler    *handler.MetricHandler
+	handler    MetricHandler
 }
 
-func NewServer(addr string, h *handler.MetricHandler) *Server {
+func NewServer(addr string, h MetricHandler) *Server {
 	s := &Server{
 		addr:    addr,
 		handler: h,

@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
 )
@@ -46,16 +45,12 @@ func (s *MetricSender) Send(m MetricData) error {
 }
 
 func (s *MetricSender) SendAll(metrics []MetricData) error {
-	var hasError bool
 
 	for _, m := range metrics {
 		if err := s.Send(m); err != nil {
-			log.Printf("MetricSender: failed to send metric %s (%s): %v", m.Name, m.Type, err)
-			hasError = true
+			return fmt.Errorf("failed to send metric %s (%s): %w", m.Name, m.Type, err)
 		}
 	}
-	if hasError {
-		return fmt.Errorf("failed to send one or more metrics")
-	}
+
 	return nil
 }
