@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 
 	"github.com/astre-ash/omnigo/internal/config"
 	"github.com/astre-ash/omnigo/internal/handler"
@@ -11,7 +12,10 @@ import (
 )
 
 func main() {
-	cfg := config.LoadServerConfig()
+	cfg, err := config.LoadServerConfig(os.Args[1:])
+	if err != nil {
+		log.Fatalf("failed to load server configuration: %v", err)
+	}
 
 	store := storage.NewMemStorage()
 	metricService := service.NewMetricService(store)
