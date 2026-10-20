@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
+
+	appMiddleware "github.com/astre-ash/omnigo/internal/middleware"
 )
 
 type MetricHandler interface {
@@ -20,12 +23,14 @@ type Server struct {
 	addr       string
 	httpServer *http.Server
 	handler    MetricHandler
+	logger     *zap.Logger
 }
 
-func NewServer(addr string, h MetricHandler) *Server {
+func NewServer(addr string, h MetricHandler, l *zap.Logger) *Server {
 	s := &Server{
 		addr:    addr,
 		handler: h,
+		logger:  l,
 	}
 
 	router := s.setupRoutes()
@@ -43,8 +48,9 @@ func NewServer(addr string, h MetricHandler) *Server {
 func (s *Server) setupRoutes() http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
+	r.Use(appMiddleware.RequestLogger(s.logger))
+
+	r.Use(chiMiddleware.Recoverer)
 
 	r.Get("/", s.handler.GetAll)
 

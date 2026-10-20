@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"html/template"
-	"log"
 	"net/http"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 )
 
 type MetricService interface {
@@ -20,13 +20,15 @@ type MetricService interface {
 type MetricHandler struct {
 	service MetricService
 	tmpl    *template.Template
+	logger  *zap.Logger
 }
 
-func NewMetricHandler(service MetricService) *MetricHandler {
+func NewMetricHandler(s MetricService, l *zap.Logger) *MetricHandler {
 	parsedTemplate := template.Must(template.New("metrics").Parse(htmlTemplate))
 	return &MetricHandler{
-		service: service,
+		service: s,
 		tmpl:    parsedTemplate,
+		logger:  l,
 	}
 }
 
@@ -72,7 +74,7 @@ func (h *MetricHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 
 	var buf bytes.Buffer
 	if err := h.tmpl.Execute(&buf, data); err != nil {
-		log.Printf("ERROR: failed to execute template: %v", err)
+		h.logger.Error("failed to execute template", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
@@ -87,10 +89,10 @@ func (h *MetricHandler) handleError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrMetricNotFound):
 		http.Error(w, domain.ErrMetricNotFound.Error(), http.StatusNotFound)
 	case errors.Is(err, domain.ErrInvalidValue), errors.Is(err, domain.ErrUnknownMetricType):
-		log.Printf("WARN: bad request: %v", err)
+		h.logger.Warn("bad request", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
-		log.Printf("ERROR: internal error: %v", err)
+		h.logger.Error("internal server error", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 }

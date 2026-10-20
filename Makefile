@@ -37,8 +37,32 @@ run-test-v4: build
 		-agent-binary-path=./bin/agent \
 		-binary-path=./bin/server \
 		-server-port=$$SERVER_PORT \
-		-source-path=.		
+		-source-path=.	
+			
+run-test-v5: build
+	@echo "Запуск автотестов для Iteration 5..."
+	@chmod +x ./metricstest_v2
+	@SERVER_PORT=$$(( (RANDOM % 10000) + 20000 )); \
+	ADDRESS="localhost:$$SERVER_PORT"; \
+	TEMP_FILE=$$(mktemp); \
+	ADDRESS=$$ADDRESS TEMP_FILE=$$TEMP_FILE ./metricstest_v2 -test.v -test.run="^TestIteration5$$" \
+		-agent-binary-path=./bin/agent \
+		-binary-path=./bin/server \
+		-server-port=$$SERVER_PORT \
+		-source-path=.
 
+run-test-v6: build
+	@echo "Запуск автотестов для Iteration 6..."
+	@chmod +x ./metricstest_v2
+	@SERVER_PORT=$$(( (RANDOM % 10000) + 20000 )); \
+	ADDRESS="localhost:$$SERVER_PORT"; \
+	TEMP_FILE=$$(mktemp); \
+	ADDRESS=$$ADDRESS TEMP_FILE=$$TEMP_FILE ./metricstest_v2 -test.v -test.run="^TestIteration6$$" \
+		-agent-binary-path=./bin/agent \
+		-binary-path=./bin/server \
+		-server-port=$$SERVER_PORT \
+		-source-path=.
+				
 clean:
 	@echo "Очистка скомпилированных файлов..."
 	rm -rf bin

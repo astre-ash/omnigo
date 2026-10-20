@@ -9,12 +9,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 	"github.com/go-chi/chi/v5"
 )
 
-// mockMetricService implements MetricService for testing.
 type mockMetricService struct {
 	// Update
 	updateType   string
@@ -105,7 +105,7 @@ func TestMetricHandler_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := &mockMetricService{updateErr: tt.serviceErr}
-			handler := NewMetricHandler(mock)
+			handler := NewMetricHandler(mock, zap.NewNop())
 			router := setupTestRouter(handler)
 
 			req := httptest.NewRequest(http.MethodPost, tt.url, nil)
@@ -163,7 +163,7 @@ func TestMetricHandler_GetValue(t *testing.T) {
 				getVal: tt.serviceVal,
 				getErr: tt.serviceErr,
 			}
-			handler := NewMetricHandler(mock)
+			handler := NewMetricHandler(mock, zap.NewNop())
 			router := setupTestRouter(handler)
 
 			req := httptest.NewRequest(http.MethodGet, tt.url, nil)
@@ -187,7 +187,7 @@ func TestMetricHandler_GetAll(t *testing.T) {
 		allCounters: map[string]int64{"poll": 3},
 	}
 
-	handler := NewMetricHandler(mock)
+	handler := NewMetricHandler(mock, zap.NewNop())
 	router := setupTestRouter(handler)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
