@@ -23,6 +23,61 @@ type MetricService struct {
 
 func NewMetricService(storage Storage) *MetricService {
 	return &MetricService{storage: storage}
+
+}
+
+func (s *MetricService) GetMetric(m domain.Metrics) (domain.Metrics, error) {
+	switch m.MType {
+	case domain.TypeGauge:
+		val, err := s.storage.GetGauge(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+		m.Value = &val
+		return m, nil
+
+	case domain.TypeCounter:
+		val, err := s.storage.GetCounter(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+		m.Delta = &val
+		return m, nil
+
+	default:
+		return domain.Metrics{}, fmt.Errorf("%w: '%s'", domain.ErrUnknownMetricType, m.MType)
+	}
+}
+
+func (s *MetricService) UpdateMetric(m domain.Metrics) (domain.Metrics, error) {
+	switch m.MType {
+	case domain.TypeGauge:
+		if m.Value == nil || math.IsNaN(*m.Value) || math.IsInf(*m.Value, 0) {
+			return domain.Metrics{}, domain.ErrInvalidValue
+		}
+		s.storage.UpdateGauge(m.ID, *m.Value)
+		return m, nil
+
+	case domain.TypeCounter:
+		if m.Delta == nil {
+			return domain.Metrics{}, domain.ErrInvalidValue
+		}
+
+		s.storage.UpdateCounter(m.ID, *m.Delta)
+
+		actualVal, err := s.storage.GetCounter(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+
+		m.Delta = &actualVal
+		return m, nil
+
+	default:
+		return domain.Metrics{}, fmt.Errorf("%w: '%s'", domain.ErrUnknownMetricType, m.MType)
+
+	}
+
 }
 
 func (s *MetricService) Update(metricType, name, valueStr string) error {

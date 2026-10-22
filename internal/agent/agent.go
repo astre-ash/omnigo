@@ -4,10 +4,12 @@ import (
 	"context"
 	"log"
 	"time"
+
+	"github.com/astre-ash/omnigo/internal/domain"
 )
 
 type Sender interface {
-	SendAll(metrics []MetricData) error
+	SendAll(metrics []domain.Metrics) error
 }
 
 type Agent struct {

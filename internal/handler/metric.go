@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"net/http"
@@ -15,6 +16,9 @@ type MetricService interface {
 	Update(metricType, name, valueStr string) error
 	Get(metricType, name string) (string, error)
 	GetAll() (map[string]float64, map[string]int64)
+
+	GetMetric(m domain.Metrics) (domain.Metrics, error)
+	UpdateMetric(m domain.Metrics) (domain.Metrics, error)
 }
 
 type MetricHandler struct {
@@ -30,6 +34,51 @@ func NewMetricHandler(s MetricService, l *zap.Logger) *MetricHandler {
 		tmpl:    parsedTemplate,
 		logger:  l,
 	}
+}
+
+func (h *MetricHandler) GetValueJSON(w http.ResponseWriter, r *http.Request) {
+	var req domain.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Warn("cannot decode request JSON", zap.Error(err))
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.ID == "" {
+		http.Error(w, "metric name is empty", http.StatusNotFound)
+		return
+	}
+	res, err := h.service.GetMetric(req)
+	if err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	h.sendJSON(w, http.StatusOK, res)
+
+}
+
+func (h *MetricHandler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
+	var req domain.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Warn("cannot decode request JSON", zap.Error(err))
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if req.ID == "" {
+		http.Error(w, "metric ID cannot be empty", http.StatusNotFound)
+		return
+	}
+
+	res, err := h.service.UpdateMetric(req)
+	if err != nil {
+
+		h.handleError(w, err)
+		return
+	}
+
+	h.sendJSON(w, http.StatusOK, res)
 }
 
 func (h *MetricHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -94,5 +143,13 @@ func (h *MetricHandler) handleError(w http.ResponseWriter, err error) {
 	default:
 		h.logger.Error("internal server error", zap.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	}
+}
+
+func (h *MetricHandler) sendJSON(w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		h.logger.Error("failed to encode response JSON", zap.Error(err))
 	}
 }

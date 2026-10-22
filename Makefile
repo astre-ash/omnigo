@@ -1,4 +1,4 @@
-.PHONY: build run-test-v1 run-test-v2 run-test-v3 run-test-v4 clean
+.PHONY: build run-test-v1 run-test-v2 run-test-v3 run-test-v4 run-test-v5 run-test-v6 run-test-v7 clean
 
 build:
 	@echo "Компиляция сервера и агента в папку bin/..."
@@ -62,6 +62,16 @@ run-test-v6: build
 		-binary-path=./bin/server \
 		-server-port=$$SERVER_PORT \
 		-source-path=.
+
+run-test-v7: build
+	@echo "Запуск автотестов для Iteration 7..."
+	@chmod +x ./metricstest_v2
+	@SERVER_PORT=$$(( (RANDOM % 10000) + 20000 )); \
+	./metricstest_v2 -test.v -test.run="^TestIteration7$$" \
+		-agent-binary-path=./bin/agent \
+		-binary-path=./bin/server \
+		-server-port=$$SERVER_PORT \
+		-source-path=.	
 				
 clean:
 	@echo "Очистка скомпилированных файлов..."

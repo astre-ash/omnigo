@@ -17,6 +17,8 @@ type MetricHandler interface {
 	Update(w http.ResponseWriter, r *http.Request)
 	GetValue(w http.ResponseWriter, r *http.Request)
 	GetAll(w http.ResponseWriter, r *http.Request)
+	GetValueJSON(w http.ResponseWriter, r *http.Request)
+	UpdateJSON(w http.ResponseWriter, r *http.Request)
 }
 
 type Server struct {
@@ -56,9 +58,11 @@ func (s *Server) setupRoutes() http.Handler {
 
 	r.Route("/update", func(r chi.Router) {
 		r.Post("/{type}/{name}/{value}", s.handler.Update)
+		r.Post("/", s.handler.UpdateJSON)
 	})
 
 	r.Route("/value", func(r chi.Router) {
+		r.Post("/", s.handler.GetValueJSON)
 		r.Get("/{type}/{name}", s.handler.GetValue)
 	})
 
