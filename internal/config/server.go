@@ -2,18 +2,30 @@ package config
 
 import (
 	"flag"
+	"fmt"
+
+	"github.com/caarlos0/env/v11"
 )
 
+const defaultServerAddress = "localhost:8080"
+
 type ServerConfig struct {
-	Address string
+	Address string `env:"ADDRESS"`
 }
 
-func LoadServerConfig() *ServerConfig {
-	cfg := &ServerConfig{}
+func LoadServerConfig(args []string) (*ServerConfig, error) {
+	var cfg ServerConfig
 
-	flag.StringVar(&cfg.Address, "a", ":8080", "endpoint HTTP server address (short)")
+	fs := flag.NewFlagSet("server", flag.ContinueOnError)
+	fs.StringVar(&cfg.Address, "a", defaultServerAddress, "endpoint HTTP server address (host:port)")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return nil, fmt.Errorf("failed to parse server command-line flags: %w", err)
+	}
 
-	return cfg
+	if err := env.Parse(&cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse server environment variables: %w", err)
+	}
+
+	return &cfg, nil
 }
