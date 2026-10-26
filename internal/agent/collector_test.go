@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"strconv"
 	"sync"
 	"testing"
 
@@ -11,64 +10,86 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
-func findMetric(metrics []MetricData, name string) (MetricData, bool) {
+func findMetric(metrics []domain.Metrics, id string) (domain.Metrics, bool) {
 	for _, m := range metrics {
-		if m.Name == name {
+		if m.ID == id {
 			return m, true
 		}
 	}
-	return MetricData{}, false
+	return domain.Metrics{}, false
 }
 
 func TestCollector_PollAndMetrics(t *testing.T) {
 	collector := NewCollector()
 
-	// 1. Check initial state before any Poll.
 	initialMetrics := collector.GetMetrics()
 	require.NotEmpty(t, initialMetrics, "metrics slice must not be empty even before poll")
 
 	pollCountMetric, ok := findMetric(initialMetrics, "PollCount")
 	require.True(t, ok, "metric PollCount must be present")
-	assert.Equal(t, domain.TypeCounter, pollCountMetric.Type)
-	assert.Equal(t, "0", pollCountMetric.Value, "initial PollCount must be 0")
+	assert.Equal(t, domain.TypeCounter, pollCountMetric.MType)
+	require.NotNil(t, pollCountMetric.Delta, "PollCount Delta pointer must not be nil")
+	assert.Equal(t, int64(0), *pollCountMetric.Delta, "initial PollCount must be 0")
 
-	// 2. Perform first Poll.
 	collector.Poll()
 	metricsAfterFirstPoll := collector.GetMetrics()
 
-	// Total metrics count: 27 runtime gauges + 1 RandomValue gauge + 1 PollCount counter = 29.
 	const expectedMetricsCount = 29
 	assert.Len(t, metricsAfterFirstPoll, expectedMetricsCount, "unexpected count of collected metrics")
 
-	// Check PollCount increment.
 	pollCountMetric, ok = findMetric(metricsAfterFirstPoll, "PollCount")
 	require.True(t, ok, "metric PollCount must be present")
-	assert.Equal(t, "1", pollCountMetric.Value, "PollCount must be 1 after first poll")
+	assert.Equal(t, domain.TypeCounter, pollCountMetric.MType)
+	require.NotNil(t, pollCountMetric.Delta)
+	assert.Equal(t, int64(1), *pollCountMetric.Delta, "PollCount must be 1 after first poll")
 
-	// Check RandomValue validity.
 	randomMetric, found := findMetric(metricsAfterFirstPoll, "RandomValue")
 	require.True(t, found, "metric RandomValue must be present")
-	assert.Equal(t, domain.TypeGauge, randomMetric.Type)
+	assert.Equal(t, domain.TypeGauge, randomMetric.MType)
+	require.NotNil(t, randomMetric.Value, "RandomValue pointer must not be nil")
+	assert.GreaterOrEqual(t, *randomMetric.Value, 0.0, "RandomValue must be >= 0.0")
+	assert.Less(t, *randomMetric.Value, 1.0, "RandomValue must be < 1.0")
 
-	randVal, err := strconv.ParseFloat(randomMetric.Value, 64)
-	require.NoError(t, err, "RandomValue must be a valid float string")
-	assert.GreaterOrEqual(t, randVal, 0.0, "RandomValue must be >= 0.0")
-	assert.Less(t, randVal, 1.0, "RandomValue must be < 1.0")
-
-	// Check that runtime metrics are actually gathered (Alloc should be > 0 in a running program).
 	allocMetric, found := findMetric(metricsAfterFirstPoll, "Alloc")
 	require.True(t, found, "metric Alloc must be present")
-	assert.Equal(t, domain.TypeGauge, allocMetric.Type)
+	assert.Equal(t, domain.TypeGauge, allocMetric.MType)
+	require.NotNil(t, allocMetric.Value, "Alloc pointer must not be nil")
+	assert.Greater(t, *allocMetric.Value, 0.0, "Alloc should be greater than 0 after Poll")
 
-	allocVal, err := strconv.ParseFloat(allocMetric.Value, 64)
-	require.NoError(t, err, "Alloc must be a valid float string")
-	assert.Greater(t, allocVal, 0.0, "Alloc should be greater than 0 after Poll")
-
-	// 3. Second Poll: verify counter increments monotonically.
 	collector.Poll()
 	metricsAfterSecondPoll := collector.GetMetrics()
-	pollCountMetric, _ = findMetric(metricsAfterSecondPoll, "PollCount")
-	assert.Equal(t, "2", pollCountMetric.Value, "PollCount must be 2 after second poll")
+	pollCountMetric, ok = findMetric(metricsAfterSecondPoll, "PollCount")
+	require.True(t, ok)
+	require.NotNil(t, pollCountMetric.Delta)
+	assert.Equal(t, int64(2), *pollCountMetric.Delta, "PollCount must be 2 after second poll")
+}
+
+func TestCollector_ResetPollCount(t *testing.T) {
+	collector := NewCollector()
+
+	collector.Poll()
+	collector.Poll()
+
+	metrics := collector.GetMetrics()
+	pollCount, ok := findMetric(metrics, "PollCount")
+	require.True(t, ok)
+	require.NotNil(t, pollCount.Delta)
+	assert.Equal(t, int64(2), *pollCount.Delta)
+
+	collector.ResetPollCount()
+
+	metricsAfterReset := collector.GetMetrics()
+	pollCountReset, ok := findMetric(metricsAfterReset, "PollCount")
+	require.True(t, ok)
+	require.NotNil(t, pollCountReset.Delta)
+	assert.Equal(t, int64(0), *pollCountReset.Delta, "PollCount must be 0 after reset")
+
+	collector.Poll()
+	metricsAfterNewPoll := collector.GetMetrics()
+	pollCountNew, ok := findMetric(metricsAfterNewPoll, "PollCount")
+	require.True(t, ok)
+	require.NotNil(t, pollCountNew.Delta)
+	assert.Equal(t, int64(1), *pollCountNew.Delta, "PollCount must be 1 after poll following reset")
 }
 
 func TestCollector_Concurrency(t *testing.T) {
@@ -84,10 +105,10 @@ func TestCollector_Concurrency(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
 				collector.Poll()
-
 			}
 		}()
 	}
+
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func() {
@@ -95,6 +116,16 @@ func TestCollector_Concurrency(t *testing.T) {
 			for j := 0; j < iterations; j++ {
 				metrics := collector.GetMetrics()
 				_ = metrics
+			}
+		}()
+	}
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				collector.ResetPollCount()
 			}
 		}()
 	}

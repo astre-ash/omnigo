@@ -2,8 +2,11 @@ package config
 
 import (
 	"flag"
+	"fmt"
 	"strings"
 	"time"
+
+	"github.com/caarlos0/env/v11"
 )
 
 const (
@@ -21,36 +24,45 @@ type LoopConfig struct {
 	ReportInterval time.Duration
 }
 
-type Config struct {
+type AgentConfig struct {
 	Sender SenderConfig
 	Loop   LoopConfig
 }
 
-func LoadAgentConfig() *Config {
-	var (
-		address        string
-		reportInterval int
-		pollInterval   int
-	)
+type agentRawConfig struct {
+	Address        string `env:"ADDRESS"`
+	ReportInterval int    `env:"REPORT_INTERVAL"`
+	PollInterval   int    `env:"POLL_INTERVAL"`
+}
 
-	flag.StringVar(&address, "a", defaultAddress, "endpoint HTTP server address (host:port)")
-	flag.IntVar(&reportInterval, "r", defaultReportInterval, "report interval to server (in seconds)")
-	flag.IntVar(&pollInterval, "p", defaultPollInterval, "poll runtime metrics interval (in seconds)")
+func LoadAgentConfig(args []string) (*AgentConfig, error) {
+	var rawCfg agentRawConfig
 
-	flag.Parse()
+	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 
-	address = strings.TrimRight(address, "/")
-	if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") {
-		address = "http://" + address
+	fs.StringVar(&rawCfg.Address, "a", defaultAddress, "endpoint HTTP server address (host:port)")
+	fs.IntVar(&rawCfg.ReportInterval, "r", defaultReportInterval, "report interval to server (in seconds)")
+	fs.IntVar(&rawCfg.PollInterval, "p", defaultPollInterval, "poll runtime metrics interval (in seconds)")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, fmt.Errorf("failed to parse command-line flags: %w", err)
 	}
 
-	return &Config{
-		Sender: SenderConfig{
-			Address: address,
-		},
+	if err := env.Parse(&rawCfg); err != nil {
+		return nil, fmt.Errorf("failed to parse environment variables: %w", err)
+	}
+
+	rawCfg.Address = strings.TrimRight(rawCfg.Address, "/")
+	if !strings.HasPrefix(rawCfg.Address, "http://") && !strings.HasPrefix(rawCfg.Address, "https://") {
+		rawCfg.Address = "http://" + rawCfg.Address
+	}
+
+	return &AgentConfig{
+		Sender: SenderConfig{Address: rawCfg.Address},
 		Loop: LoopConfig{
-			ReportInterval: time.Duration(reportInterval) * time.Second,
-			PollInterval:   time.Duration(pollInterval) * time.Second,
+			ReportInterval: time.Duration(rawCfg.ReportInterval) * time.Second,
+			PollInterval:   time.Duration(rawCfg.PollInterval) * time.Second,
 		},
-	}
+	}, nil
+
 }
