@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,17 +26,43 @@ func NewMetricSender(serverAddr string) *MetricSender {
 	}
 }
 
+func compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+
+	if _, err := zw.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to write gzip data: %w", err)
+	}
+
+	if err := zw.Close(); err != nil {
+		return nil, fmt.Errorf("failed to finalize gzip compression: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
 func (s *MetricSender) Send(m domain.Metrics) error {
 	url := fmt.Sprintf("%s/update/", s.serverAddr)
-	body, err := json.Marshal(m)
+
+	data, err := json.Marshal(m)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+
+	compressedData, err := compress(data)
+	if err != nil {
+		return fmt.Errorf("failed to compress metric payload: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(compressedData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	req.Header.Set("Accept-Encoding", "gzip")
+
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)

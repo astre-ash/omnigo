@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -22,30 +24,43 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
+func decompressBody(r io.Reader) ([]byte, error) {
+	zr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+
+	return io.ReadAll(zr)
+}
+
 func TestMetricSender_Send(t *testing.T) {
-	t.Run("successful request with correct JSON body, URL and headers", func(t *testing.T) {
+	t.Run("successful request with gzip compression, JSON body, and headers", func(t *testing.T) {
 		var (
-			receivedMethod      string
-			receivedPath        string
-			receivedContentType string
-			receivedBody        []byte
+			receivedMethod          string
+			receivedPath            string
+			receivedContentType     string
+			receivedContentEncoding string
+			receivedAcceptEncoding  string
+			decompressedBody        []byte
 		)
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			receivedMethod = r.Method
 			receivedPath = r.URL.Path
 			receivedContentType = r.Header.Get("Content-Type")
+			receivedContentEncoding = r.Header.Get("Content-Encoding")
+			receivedAcceptEncoding = r.Header.Get("Accept-Encoding")
 
 			var err error
-			receivedBody, err = io.ReadAll(r.Body)
+			decompressedBody, err = decompressBody(r.Body)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, "failed to decompress gzip body", http.StatusBadRequest)
 				return
 			}
 
 			w.WriteHeader(http.StatusOK)
 		}))
-
 		defer server.Close()
 
 		sender := NewMetricSender(server.URL)
@@ -61,11 +76,12 @@ func TestMetricSender_Send(t *testing.T) {
 		assert.Equal(t, http.MethodPost, receivedMethod, "HTTP method must be POST")
 		assert.Equal(t, "/update/", receivedPath, "request path mismatch")
 		assert.Equal(t, "application/json", receivedContentType, "content-type header must be application/json")
+		assert.Equal(t, "gzip", receivedContentEncoding, "content-encoding header must be gzip")
+		assert.Equal(t, "gzip", receivedAcceptEncoding, "accept-encoding header must be gzip")
 
 		var actualMetric domain.Metrics
-		err = json.Unmarshal(receivedBody, &actualMetric)
-
-		require.NoError(t, err, "request body should be valid JSON")
+		err = json.Unmarshal(decompressedBody, &actualMetric)
+		require.NoError(t, err, "decompressed body should be valid JSON")
 		assert.Equal(t, metric, actualMetric, "sent and received metrics must match")
 	})
 
@@ -105,7 +121,7 @@ func TestMetricSender_Send(t *testing.T) {
 }
 
 func TestMetricSender_SendAll(t *testing.T) {
-	t.Run("successful sending all metrics", func(t *testing.T) {
+	t.Run("successful sending all metrics with gzip decompression", func(t *testing.T) {
 		var (
 			mtx             sync.Mutex
 			receivedMetrics []domain.Metrics
@@ -116,10 +132,19 @@ func TestMetricSender_SendAll(t *testing.T) {
 			mtx.Lock()
 			defer mtx.Unlock()
 
+			assert.Equal(t, "gzip", r.Header.Get("Content-Encoding"))
+
 			receivedPaths = append(receivedPaths, r.URL.Path)
 
+			zr, err := gzip.NewReader(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer zr.Close()
+
 			var m domain.Metrics
-			if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			if err := json.NewDecoder(zr).Decode(&m); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -127,7 +152,6 @@ func TestMetricSender_SendAll(t *testing.T) {
 
 			w.WriteHeader(http.StatusOK)
 		}))
-
 		defer server.Close()
 
 		sender := NewMetricSender(server.URL)
@@ -179,4 +203,20 @@ func TestMetricSender_SendAll(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to send metric PollCount (counter)")
 		assert.Contains(t, err.Error(), "unexpected status code: 500")
 	})
+}
+
+func TestCompress(t *testing.T) {
+	originalData := []byte(`{"id":"Alloc","type":"gauge","value":123.45}`)
+
+	compressed, err := compress(originalData)
+	require.NoError(t, err, "compression must not fail")
+	require.NotEmpty(t, compressed, "compressed data must not be empty")
+
+	zr, err := gzip.NewReader(bytes.NewReader(compressed))
+	require.NoError(t, err)
+	defer zr.Close()
+
+	decompressed, err := io.ReadAll(zr)
+	require.NoError(t, err)
+	assert.Equal(t, originalData, decompressed, "decompressed data must match original")
 }

@@ -51,7 +51,7 @@ func (s *Server) setupRoutes() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(appMiddleware.RequestLogger(s.logger))
-
+	r.Use(appMiddleware.Compress())
 	r.Use(chiMiddleware.Recoverer)
 
 	r.Get("/", s.handler.GetAll)
