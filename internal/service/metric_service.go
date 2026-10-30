@@ -9,8 +9,8 @@ import (
 )
 
 type Storage interface {
-	UpdateGauge(name string, value float64)
-	UpdateCounter(name string, value int64)
+	UpdateGauge(name string, value float64) error
+	UpdateCounter(name string, value int64) error
 	GetGauge(name string) (float64, error)
 	GetCounter(name string) (int64, error)
 	GetAllGauges() map[string]float64
@@ -55,7 +55,10 @@ func (s *MetricService) UpdateMetric(m domain.Metrics) (domain.Metrics, error) {
 		if m.Value == nil || math.IsNaN(*m.Value) || math.IsInf(*m.Value, 0) {
 			return domain.Metrics{}, domain.ErrInvalidValue
 		}
-		s.storage.UpdateGauge(m.ID, *m.Value)
+		if err := s.storage.UpdateGauge(m.ID, *m.Value); err != nil {
+			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
+		}
+
 		return m, nil
 
 	case domain.TypeCounter:
@@ -63,7 +66,9 @@ func (s *MetricService) UpdateMetric(m domain.Metrics) (domain.Metrics, error) {
 			return domain.Metrics{}, domain.ErrInvalidValue
 		}
 
-		s.storage.UpdateCounter(m.ID, *m.Delta)
+		if err := s.storage.UpdateCounter(m.ID, *m.Delta); err != nil {
+			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
+		}
 
 		actualVal, err := s.storage.GetCounter(m.ID)
 		if err != nil {

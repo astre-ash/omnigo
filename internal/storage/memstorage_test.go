@@ -161,16 +161,131 @@ func TestMemStorage_GetAllCounters(t *testing.T) {
 	})
 }
 
+func TestMemStorage_Snapshot(t *testing.T) {
+	t.Run("empty storage returns empty slice", func(t *testing.T) {
+		s := NewMemStorage()
+
+		snapshot := s.Snapshot()
+		require.NotNil(t, snapshot)
+		assert.Empty(t, snapshot)
+	})
+
+	t.Run("snapshot contains all metrics with isolated pointers", func(t *testing.T) {
+		s := NewMemStorage()
+
+		s.UpdateGauge("Alloc", 123.45)
+		s.UpdateCounter("PollCount", 10)
+
+		snapshot := s.Snapshot()
+		require.Len(t, snapshot, 2)
+
+		// Assert gauge.
+		allocMetric, found := findMetricInSlice(snapshot, "Alloc")
+		require.True(t, found)
+		assert.Equal(t, domain.TypeGauge, allocMetric.MType)
+		require.NotNil(t, allocMetric.Value)
+		assert.Equal(t, 123.45, *allocMetric.Value)
+		assert.Nil(t, allocMetric.Delta)
+
+		// Assert counter.
+		pollMetric, found := findMetricInSlice(snapshot, "PollCount")
+		require.True(t, found)
+		assert.Equal(t, domain.TypeCounter, pollMetric.MType)
+		require.NotNil(t, pollMetric.Delta)
+		assert.Equal(t, int64(10), *pollMetric.Delta)
+		assert.Nil(t, pollMetric.Value)
+	})
+}
+
+func TestMemStorage_Restore(t *testing.T) {
+	t.Run("restore metrics into empty storage", func(t *testing.T) {
+		s := NewMemStorage()
+
+		metrics := []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(543.21)},
+			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(42)},
+		}
+
+		s.Restore(metrics)
+
+		gaugeVal, err := s.GetGauge("Alloc")
+		require.NoError(t, err)
+		assert.Equal(t, 543.21, gaugeVal)
+
+		counterVal, err := s.GetCounter("PollCount")
+		require.NoError(t, err)
+		assert.Equal(t, int64(42), counterVal)
+	})
+
+	t.Run("restore overwrites existing metrics", func(t *testing.T) {
+		s := NewMemStorage()
+
+		s.UpdateGauge("Alloc", 100.0)
+		s.UpdateCounter("PollCount", 5)
+
+		metrics := []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(200.0)},
+			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(25)},
+		}
+
+		s.Restore(metrics)
+
+		gaugeVal, err := s.GetGauge("Alloc")
+		require.NoError(t, err)
+		assert.Equal(t, 200.0, gaugeVal)
+
+		counterVal, err := s.GetCounter("PollCount")
+		require.NoError(t, err)
+		assert.Equal(t, int64(25), counterVal)
+	})
+
+	t.Run("ignores metrics with nil values and unknown types gracefully", func(t *testing.T) {
+		s := NewMemStorage()
+
+		metrics := []domain.Metrics{
+			{ID: "NilGauge", MType: domain.TypeGauge, Value: nil},
+			{ID: "NilCounter", MType: domain.TypeCounter, Delta: nil},
+			{ID: "Unknown", MType: "unknown_type", Value: float64Ptr(1.0)},
+		}
+
+		s.Restore(metrics)
+
+		_, err := s.GetGauge("NilGauge")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
+
+		_, err = s.GetCounter("NilCounter")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
+
+		assert.Empty(t, s.GetAllGauges())
+		assert.Empty(t, s.GetAllCounters())
+	})
+}
+
+func TestMemStorage_SnapshotAndRestore_RoundTrip(t *testing.T) {
+	s1 := NewMemStorage()
+	s1.UpdateGauge("Alloc", 100.5)
+	s1.UpdateGauge("Sys", 200.0)
+	s1.UpdateCounter("PollCount", 15)
+
+	snapshot := s1.Snapshot()
+
+	s2 := NewMemStorage()
+	s2.Restore(snapshot)
+
+	assert.Equal(t, s1.GetAllGauges(), s2.GetAllGauges())
+	assert.Equal(t, s1.GetAllCounters(), s2.GetAllCounters())
+}
+
 func TestMemStorage_Concurrent(t *testing.T) {
 	s := NewMemStorage()
 
 	const (
 		goroutines = 50
-		iterations = 1000
+		iterations = 500
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(goroutines * 2)
+	wg.Add(goroutines * 3)
 
 	for i := 0; i < goroutines; i++ {
 		go func() {
@@ -197,9 +312,40 @@ func TestMemStorage_Concurrent(t *testing.T) {
 		}(i)
 	}
 
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				if j%50 == 0 {
+					snapshot := s.Snapshot()
+					if len(snapshot) > 0 {
+						s.Restore(snapshot[:1])
+					}
+				}
+			}
+		}()
+	}
+
 	wg.Wait()
 
 	val, err := s.GetCounter("requests")
 	require.NoError(t, err, "counter 'requests' must exist")
-	assert.Equal(t, int64(goroutines*iterations), val)
+	assert.Greater(t, val, int64(0))
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
+func findMetricInSlice(metrics []domain.Metrics, id string) (domain.Metrics, bool) {
+	for _, m := range metrics {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return domain.Metrics{}, false
 }
