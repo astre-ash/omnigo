@@ -3,22 +3,23 @@ package agent
 import (
 	"context"
 	"errors"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/astre-ash/omnigo/internal/domain"
 )
 
 type mockSender struct {
 	mtx     sync.Mutex
 	err     error
-	batches [][]MetricData
+	batches [][]domain.Metrics
 }
 
-func (m *mockSender) SendAll(metrics []MetricData) error {
+func (m *mockSender) SendAll(metrics []domain.Metrics) error {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 
@@ -26,30 +27,27 @@ func (m *mockSender) SendAll(metrics []MetricData) error {
 		return m.err
 	}
 
-	batchCopy := make([]MetricData, len(metrics))
+	batchCopy := make([]domain.Metrics, len(metrics))
 	copy(batchCopy, metrics)
 	m.batches = append(m.batches, batchCopy)
 
 	return nil
 }
 
-func (m *mockSender) getBatches() [][]MetricData {
+func (m *mockSender) getBatches() [][]domain.Metrics {
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
 	return m.batches
 }
 
 func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
-
 	pollInterval := 10 * time.Millisecond
 	reportInterval := 30 * time.Millisecond
 
 	collector := NewCollector()
-
 	mock := &mockSender{}
 	agent := NewAgent(pollInterval, reportInterval, collector, mock)
 
-	// 75ms = 7 polls, 2 reports.
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
 	defer cancel()
 
@@ -61,7 +59,6 @@ func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
 
 	select {
 	case <-done:
-
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("agent did not stop within expected time")
 	}
@@ -72,19 +69,15 @@ func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
 	assert.Len(t, batches[0], 29, "expected 29 metrics in batch")
 
 	firstBatchPoll, found1 := findMetric(batches[0], "PollCount")
-	require.True(t, found1)
-
-	val1, err := strconv.ParseInt(firstBatchPoll.Value, 10, 64)
-	require.NoError(t, err)
-	assert.Greater(t, val1, int64(0), "first batch pollCount should be > 0")
+	require.True(t, found1, "PollCount must be present in first batch")
+	require.NotNil(t, firstBatchPoll.Delta, "PollCount Delta pointer must not be nil")
+	assert.Greater(t, *firstBatchPoll.Delta, int64(0), "first batch pollCount should be > 0")
 
 	if len(batches) > 1 {
 		secondBatchPoll, found2 := findMetric(batches[1], "PollCount")
-		require.True(t, found2)
-
-		val2, err := strconv.ParseInt(secondBatchPoll.Value, 10, 64)
-		require.NoError(t, err)
-		assert.LessOrEqual(t, val2, int64(4), "pollCount must be reset between successful reports")
+		require.True(t, found2, "PollCount must be present in second batch")
+		require.NotNil(t, secondBatchPoll.Delta)
+		assert.LessOrEqual(t, *secondBatchPoll.Delta, int64(4), "pollCount must be reset between successful reports")
 	}
 }
 
@@ -103,6 +96,7 @@ func TestAgent_Run_SendFailureRetainsPollCount(t *testing.T) {
 	defer cancel()
 
 	done := make(chan struct{})
+
 	go func() {
 		agent.Run(ctx)
 		close(done)
@@ -112,11 +106,9 @@ func TestAgent_Run_SendFailureRetainsPollCount(t *testing.T) {
 
 	metrics := collector.GetMetrics()
 	pollMetric, found := findMetric(metrics, "PollCount")
-	require.True(t, found)
-
-	finalPollCount, err := strconv.ParseInt(pollMetric.Value, 10, 64)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, finalPollCount, int64(4), "pollCount must NOT be reset when sending fails")
+	require.True(t, found, "PollCount must be present")
+	require.NotNil(t, pollMetric.Delta, "PollCount Delta must not be nil")
+	assert.GreaterOrEqual(t, *pollMetric.Delta, int64(4), "pollCount must NOT be reset when sending fails")
 }
 
 func TestAgent_Run_GracefulShutdown(t *testing.T) {
@@ -139,7 +131,6 @@ func TestAgent_Run_GracefulShutdown(t *testing.T) {
 
 	select {
 	case <-done:
-
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("agent failed to terminate immediately upon context cancellation")
 	}
