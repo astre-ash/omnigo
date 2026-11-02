@@ -114,8 +114,7 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 		persister := &mockPersister{loadRes: testMetrics}
 		mem := &mockInMemStorage{}
 
-		pm, _, err := NewPersistenceManager(mem, persister, 300, true, zap.NewNop())
-		require.NoError(t, err)
+		pm, _ := NewPersistenceManager(mem, persister, 300*time.Second, true, zap.NewNop())
 		require.NotNil(t, pm)
 
 		assert.Equal(t, 1, persister.loadCalls)
@@ -123,12 +122,11 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 		assert.Equal(t, testMetrics, mem.restoredMetrics)
 	})
 
-	t.Run("does not fail when persister.Load returns error", func(t *testing.T) {
+	t.Run("does not panic or fail when persister.Load returns error", func(t *testing.T) {
 		persister := &mockPersister{loadErr: errors.New("file corrupted")}
 		mem := &mockInMemStorage{}
 
-		pm, _, err := NewPersistenceManager(mem, persister, 300, true, zap.NewNop())
-		require.NoError(t, err, "initialization should not fail on load error")
+		pm, _ := NewPersistenceManager(mem, persister, 300*time.Second, true, zap.NewNop())
 		require.NotNil(t, pm)
 
 		assert.Equal(t, 1, persister.loadCalls)
@@ -139,8 +137,8 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 		persister := &mockPersister{loadRes: []domain.Metrics{}}
 		mem := &mockInMemStorage{}
 
-		_, _, err := NewPersistenceManager(mem, persister, 300, true, zap.NewNop())
-		require.NoError(t, err)
+		pm, _ := NewPersistenceManager(mem, persister, 300*time.Second, true, zap.NewNop())
+		require.NotNil(t, pm)
 
 		assert.Equal(t, 1, persister.loadCalls)
 		assert.Equal(t, 0, mem.restoreCalls)
@@ -150,8 +148,8 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 		persister := &mockPersister{loadRes: testMetrics}
 		mem := &mockInMemStorage{}
 
-		_, _, err := NewPersistenceManager(mem, persister, 300, false, zap.NewNop())
-		require.NoError(t, err)
+		pm, _ := NewPersistenceManager(mem, persister, 300*time.Second, false, zap.NewNop())
+		require.NotNil(t, pm)
 
 		assert.Equal(t, 0, persister.loadCalls)
 		assert.Equal(t, 0, mem.restoreCalls)
@@ -160,8 +158,8 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 	t.Run("does not panic when persister is nil and restore is true", func(t *testing.T) {
 		mem := &mockInMemStorage{}
 
-		pm, activeStorage, err := NewPersistenceManager(mem, nil, 300, true, zap.NewNop())
-		require.NoError(t, err)
+		pm, activeStorage := NewPersistenceManager(mem, nil, 300*time.Second, true, zap.NewNop())
+		require.NotNil(t, pm)
 		assert.Equal(t, mem, activeStorage)
 		assert.Nil(t, pm.persister)
 	})
@@ -172,8 +170,7 @@ func TestNewPersistenceManager_ActiveStorageSelection(t *testing.T) {
 		persister := &mockPersister{}
 		mem := &mockInMemStorage{}
 
-		_, activeStorage, err := NewPersistenceManager(mem, persister, 0, false, zap.NewNop())
-		require.NoError(t, err)
+		_, activeStorage := NewPersistenceManager(mem, persister, 0, false, zap.NewNop())
 
 		_, ok := activeStorage.(*SyncStorage)
 		assert.True(t, ok, "expected activeStorage to be *SyncStorage for synchronous mode (storeInterval=0)")
@@ -183,8 +180,7 @@ func TestNewPersistenceManager_ActiveStorageSelection(t *testing.T) {
 		persister := &mockPersister{}
 		mem := &mockInMemStorage{}
 
-		_, activeStorage, err := NewPersistenceManager(mem, persister, 60, false, zap.NewNop())
-		require.NoError(t, err)
+		_, activeStorage := NewPersistenceManager(mem, persister, 60*time.Second, false, zap.NewNop())
 
 		assert.Equal(t, mem, activeStorage, "expected activeStorage to be plain memStorage")
 	})
@@ -192,8 +188,7 @@ func TestNewPersistenceManager_ActiveStorageSelection(t *testing.T) {
 	t.Run("returns original memStorage when storeInterval is 0 but persister is nil", func(t *testing.T) {
 		mem := &mockInMemStorage{}
 
-		_, activeStorage, err := NewPersistenceManager(mem, nil, 0, false, zap.NewNop())
-		require.NoError(t, err)
+		_, activeStorage := NewPersistenceManager(mem, nil, 0, false, zap.NewNop())
 
 		assert.Equal(t, mem, activeStorage)
 	})
@@ -277,7 +272,7 @@ func TestPersistenceManager_StartAsyncFlush(t *testing.T) {
 
 	t.Run("does not start goroutine when persister is nil", func(t *testing.T) {
 		pm := &PersistenceManager{
-			storeInterval: 10,
+			storeInterval: 10 * time.Millisecond,
 			persister:     nil,
 			logger:        zap.NewNop(),
 		}
@@ -286,6 +281,7 @@ func TestPersistenceManager_StartAsyncFlush(t *testing.T) {
 		defer cancel()
 
 		pm.StartAsyncFlush(ctx)
+		assert.Nil(t, pm.cancel)
 	})
 
 	t.Run("periodically dumps metrics and terminates on context cancellation", func(t *testing.T) {
@@ -295,7 +291,7 @@ func TestPersistenceManager_StartAsyncFlush(t *testing.T) {
 		pm := &PersistenceManager{
 			memStore:      mem,
 			persister:     persister,
-			storeInterval: 1,
+			storeInterval: 25 * time.Millisecond,
 			logger:        zap.NewNop(),
 		}
 
@@ -305,12 +301,53 @@ func TestPersistenceManager_StartAsyncFlush(t *testing.T) {
 
 		require.Eventually(t, func() bool {
 			return persister.getSaveCalls() >= 1
-		}, 2*time.Second, 100*time.Millisecond, "expected async flush to trigger at least once")
+		}, 1*time.Second, 10*time.Millisecond, "expected async flush to trigger at least once")
 
 		cancel()
 
 		currentCalls := persister.getSaveCalls()
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(75 * time.Millisecond)
 		assert.Equal(t, currentCalls, persister.getSaveCalls(), "no more flushes should happen after context cancellation")
+	})
+}
+
+func TestPersistenceManager_Stop(t *testing.T) {
+	t.Run("stops async flush and performs final flush", func(t *testing.T) {
+		mem := &mockInMemStorage{}
+		persister := &mockPersister{}
+
+		pm := &PersistenceManager{
+			memStore:      mem,
+			persister:     persister,
+			storeInterval: 25 * time.Millisecond,
+			logger:        zap.NewNop(),
+		}
+
+		pm.StartAsyncFlush(context.Background())
+
+		require.Eventually(t, func() bool {
+			return persister.getSaveCalls() >= 1
+		}, 1*time.Second, 10*time.Millisecond)
+
+		callsBeforeStop := persister.getSaveCalls()
+		err := pm.Stop()
+		require.NoError(t, err)
+
+		assert.GreaterOrEqual(t, persister.getSaveCalls(), callsBeforeStop+1)
+	})
+
+	t.Run("safe to call Stop without StartAsyncFlush", func(t *testing.T) {
+		mem := &mockInMemStorage{}
+		persister := &mockPersister{}
+
+		pm := &PersistenceManager{
+			memStore:  mem,
+			persister: persister,
+			logger:    zap.NewNop(),
+		}
+
+		err := pm.Stop()
+		require.NoError(t, err)
+		assert.Equal(t, 1, persister.getSaveCalls())
 	})
 }

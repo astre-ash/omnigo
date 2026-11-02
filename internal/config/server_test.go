@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,7 +23,7 @@ func TestLoadServerConfig(t *testing.T) {
 			envs: map[string]string{},
 			wantConfig: &ServerConfig{
 				Address:         defaultServerAddress,
-				StoreInterval:   defaultStoreInterval,
+				StoreInterval:   defaultStoreInterval * time.Second,
 				FileStoragePath: defaultFileStoragePath,
 				Restore:         defaultRestore,
 			},
@@ -38,7 +40,7 @@ func TestLoadServerConfig(t *testing.T) {
 			envs: map[string]string{},
 			wantConfig: &ServerConfig{
 				Address:         ":9090",
-				StoreInterval:   10,
+				StoreInterval:   10 * time.Second,
 				FileStoragePath: "/custom/path/storage.json",
 				Restore:         false,
 			},
@@ -60,7 +62,7 @@ func TestLoadServerConfig(t *testing.T) {
 			},
 			wantConfig: &ServerConfig{
 				Address:         "127.0.0.1:7070",
-				StoreInterval:   60,
+				StoreInterval:   60 * time.Second,
 				FileStoragePath: "/env/path.json",
 				Restore:         false,
 			},
@@ -75,7 +77,7 @@ func TestLoadServerConfig(t *testing.T) {
 			envs: map[string]string{},
 			wantConfig: &ServerConfig{
 				Address:         defaultServerAddress,
-				StoreInterval:   0,
+				StoreInterval:   0 * time.Second,
 				FileStoragePath: "",
 				Restore:         defaultRestore,
 			},
@@ -93,6 +95,14 @@ func TestLoadServerConfig(t *testing.T) {
 			name: "failure: invalid integer flag value",
 			args: []string{
 				"-i", "not_a_number",
+			},
+			envs:    map[string]string{},
+			wantErr: true,
+		},
+		{
+			name: "failure: negative store interval in flag",
+			args: []string{
+				"-i", "-5",
 			},
 			envs:    map[string]string{},
 			wantErr: true,
@@ -117,6 +127,16 @@ func TestLoadServerConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			knownEnvs := []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE"}
+			for _, envKey := range knownEnvs {
+				if _, ok := tt.envs[envKey]; !ok {
+					if origVal, exists := os.LookupEnv(envKey); exists {
+						os.Unsetenv(envKey)
+						t.Cleanup(func() { os.Setenv(envKey, origVal) })
+					}
+				}
+			}
+
 			for k, v := range tt.envs {
 				t.Setenv(k, v)
 			}

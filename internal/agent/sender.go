@@ -2,7 +2,6 @@ package agent
 
 import (
 	"bytes"
-	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,33 +11,24 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
+type Compressor interface {
+	Compress(data []byte) ([]byte, error)
+}
+
 type MetricSender struct {
 	serverAddr string
 	client     *http.Client
+	compressor Compressor
 }
 
-func NewMetricSender(serverAddr string) *MetricSender {
+func NewMetricSender(serverAddr string, compressor Compressor) *MetricSender {
 	return &MetricSender{
 		serverAddr: serverAddr,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
+		compressor: compressor,
 	}
-}
-
-func compress(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-
-	if _, err := zw.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to write gzip data: %w", err)
-	}
-
-	if err := zw.Close(); err != nil {
-		return nil, fmt.Errorf("failed to finalize gzip compression: %w", err)
-	}
-
-	return buf.Bytes(), nil
 }
 
 func (s *MetricSender) Send(m domain.Metrics) error {
@@ -49,12 +39,18 @@ func (s *MetricSender) Send(m domain.Metrics) error {
 		return fmt.Errorf("failed to marshal metric: %w", err)
 	}
 
-	compressedData, err := compress(data)
-	if err != nil {
-		return fmt.Errorf("failed to compress metric payload: %w", err)
+	var body io.Reader
+	if s.compressor != nil {
+		compressedData, err := s.compressor.Compress(data)
+		if err != nil {
+			return fmt.Errorf("failed to compress metric payload: %w", err)
+		}
+		body = bytes.NewReader(compressedData)
+	} else {
+		body = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(compressedData))
+	req, err := http.NewRequest(http.MethodPost, url, body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}

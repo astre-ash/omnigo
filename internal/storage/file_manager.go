@@ -18,7 +18,7 @@ func NewFileManager(filePath string) *FileManager {
 	return &FileManager{filePath: filePath}
 }
 
-func (fm *FileManager) Save(snapshort []domain.Metrics) error {
+func (fm *FileManager) Save(snapshot []domain.Metrics) error {
 	if fm.filePath == "" {
 		return nil
 	}
@@ -30,13 +30,34 @@ func (fm *FileManager) Save(snapshort []domain.Metrics) error {
 		}
 	}
 
-	data, err := json.MarshalIndent(snapshort, "", "  ")
+	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	if err := os.WriteFile(fm.filePath, data, 0666); err != nil {
-		return fmt.Errorf("failed to write metrics to file: %w", err)
+	tmpFile, err := os.CreateTemp(dir, "metrics-*.tmp")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write data to temp file: %w", err)
+	}
+
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to sync temp file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile.Name(), fm.filePath); err != nil {
+		return fmt.Errorf("failed to rename temp file to target: %w", err)
 	}
 
 	return nil

@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/astre-ash/omnigo/pkg/compress"
 )
 
 type gzipReadCloser struct {
@@ -30,7 +32,6 @@ type compressResponseWriter struct {
 func newCompressResponseWriter(w http.ResponseWriter) *compressResponseWriter {
 	return &compressResponseWriter{
 		ResponseWriter: w,
-		zw:             gzip.NewWriter(w),
 	}
 }
 
@@ -46,9 +47,13 @@ func (c *compressResponseWriter) WriteHeader(statusCode int) {
 	c.wroteHeader = true
 
 	if c.shouldCompress() {
-		c.compress = true
-		c.Header().Set("Content-Encoding", "gzip")
-		c.Header().Del("Content-Length")
+		zw, err := compress.NewWriter(c.ResponseWriter)
+		if err == nil {
+			c.compress = true
+			c.zw = zw
+			c.Header().Set("Content-Encoding", "gzip")
+			c.Header().Del("Content-Length")
+		}
 	}
 
 	c.ResponseWriter.WriteHeader(statusCode)
@@ -66,7 +71,7 @@ func (c *compressResponseWriter) Write(b []byte) (int, error) {
 }
 
 func (c *compressResponseWriter) Close() error {
-	if c.compress {
+	if c.compress && c.zw != nil {
 		return c.zw.Close()
 	}
 	return nil
@@ -77,12 +82,15 @@ func Compress() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 			if strings.Contains(r.Header.Get("Content-Encoding"), "gzip") {
-				gzReader, err := gzip.NewReader(r.Body)
+				gzReader, err := compress.NewReader(r.Body)
 				if err != nil {
 					http.Error(w, "failed to decode gzip body", http.StatusBadRequest)
 					return
 				}
-				r.Body = &gzipReadCloser{Reader: gzReader, orig: r.Body}
+				r.Body = &gzipReadCloser{
+					Reader: gzReader,
+					orig:   r.Body,
+				}
 			}
 
 			acceptsGzip := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")

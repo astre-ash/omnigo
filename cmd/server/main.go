@@ -46,20 +46,17 @@ func run(ctx context.Context) error {
 		persister = storage.NewFileManager(cfg.FileStoragePath)
 	}
 
-	pm, store, err := storage.NewPersistenceManager(
+	pm, store := storage.NewPersistenceManager(
 		memStore,
 		persister,
 		cfg.StoreInterval,
 		cfg.Restore,
 		logger,
 	)
-	if err != nil {
-		return fmt.Errorf("failed to initialize persistence: %w", err)
-	}
 
 	defer func() {
-		if err := pm.Flush(); err != nil {
-			logger.Error("failed to dump metrics on shutdown", zap.Error(err))
+		if err := pm.Stop(); err != nil {
+			logger.Error("failed to stop persistence manager and dump metrics", zap.Error(err))
 		} else if cfg.FileStoragePath != "" {
 			logger.Info("metrics saved successfully on shutdown")
 		}
@@ -73,7 +70,7 @@ func run(ctx context.Context) error {
 
 	logger.Info("server starting",
 		zap.String("addr", cfg.Address),
-		zap.Int("store_interval", cfg.StoreInterval),
+		zap.Duration("store_interval", cfg.StoreInterval),
 		zap.String("file_storage_path", cfg.FileStoragePath),
 		zap.Bool("restore", cfg.Restore),
 	)

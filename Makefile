@@ -1,5 +1,5 @@
 .PHONY: build run-test-v1 run-test-v2 run-test-v3 run-test-v4 run-test-v5 run-test-v6 run-test-v7 run-test-v8
-run-test-v9 clean
+	run-test-v9 clean
 
 build:
 	@echo "Компиляция сервера и агента в папку bin/..."

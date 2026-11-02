@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -32,6 +34,26 @@ func decompressBody(r io.Reader) ([]byte, error) {
 	defer zr.Close()
 
 	return io.ReadAll(zr)
+}
+
+type mockCompressor struct {
+	compressFn func(data []byte) ([]byte, error)
+}
+
+func (m *mockCompressor) Compress(data []byte) ([]byte, error) {
+	if m.compressFn != nil {
+		return m.compressFn(data)
+	}
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func TestMetricSender_Send(t *testing.T) {
@@ -63,7 +85,7 @@ func TestMetricSender_Send(t *testing.T) {
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL)
+		sender := NewMetricSender(server.URL, &mockCompressor{})
 		metric := domain.Metrics{
 			ID:    "Alloc",
 			MType: "gauge",
@@ -85,13 +107,78 @@ func TestMetricSender_Send(t *testing.T) {
 		assert.Equal(t, metric, actualMetric, "sent and received metrics must match")
 	})
 
+	t.Run("successful request without compressor sends uncompressed body", func(t *testing.T) {
+		var receivedBody []byte
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var err error
+			receivedBody, err = io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "failed to read body", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		sender := NewMetricSender(server.URL, nil)
+		metric := domain.Metrics{
+			ID:    "Alloc",
+			MType: "gauge",
+			Value: float64Ptr(42.0),
+		}
+
+		err := sender.Send(metric)
+		require.NoError(t, err)
+
+		var actualMetric domain.Metrics
+		err = json.Unmarshal(receivedBody, &actualMetric)
+		require.NoError(t, err)
+		assert.Equal(t, metric, actualMetric)
+	})
+
+	t.Run("returns error when compressor fails", func(t *testing.T) {
+		errCompression := errors.New("compression failed")
+		compressor := &mockCompressor{
+			compressFn: func(data []byte) ([]byte, error) {
+				return nil, errCompression
+			},
+		}
+
+		sender := NewMetricSender("http://localhost:8080", compressor)
+		metric := domain.Metrics{
+			ID:    "Alloc",
+			MType: "gauge",
+			Value: float64Ptr(100),
+		}
+
+		err := sender.Send(metric)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errCompression)
+		assert.Contains(t, err.Error(), "failed to compress metric payload")
+	})
+
+	t.Run("returns error when metric serialization fails", func(t *testing.T) {
+		sender := NewMetricSender("http://localhost:8080", &mockCompressor{})
+		nanVal := math.NaN()
+		metric := domain.Metrics{
+			ID:    "Alloc",
+			MType: "gauge",
+			Value: &nanVal,
+		}
+
+		err := sender.Send(metric)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to marshal metric")
+	})
+
 	t.Run("returns error when server responds with non-200 status", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL)
+		sender := NewMetricSender(server.URL, &mockCompressor{})
 		metric := domain.Metrics{
 			ID:    "Alloc",
 			MType: "gauge",
@@ -107,7 +194,7 @@ func TestMetricSender_Send(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		server.Close()
 
-		sender := NewMetricSender(server.URL)
+		sender := NewMetricSender(server.URL, &mockCompressor{})
 		metric := domain.Metrics{
 			ID:    "Alloc",
 			MType: "gauge",
@@ -154,7 +241,7 @@ func TestMetricSender_SendAll(t *testing.T) {
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL)
+		sender := NewMetricSender(server.URL, &mockCompressor{})
 		metrics := []domain.Metrics{
 			{
 				ID:    "Alloc",
@@ -192,7 +279,7 @@ func TestMetricSender_SendAll(t *testing.T) {
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL)
+		sender := NewMetricSender(server.URL, &mockCompressor{})
 		metrics := []domain.Metrics{
 			{ID: "Alloc", MType: "gauge", Value: float64Ptr(100.5)},
 			{ID: "PollCount", MType: "counter", Delta: int64Ptr(1)},
@@ -203,20 +290,10 @@ func TestMetricSender_SendAll(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to send metric PollCount (counter)")
 		assert.Contains(t, err.Error(), "unexpected status code: 500")
 	})
-}
 
-func TestCompress(t *testing.T) {
-	originalData := []byte(`{"id":"Alloc","type":"gauge","value":123.45}`)
-
-	compressed, err := compress(originalData)
-	require.NoError(t, err, "compression must not fail")
-	require.NotEmpty(t, compressed, "compressed data must not be empty")
-
-	zr, err := gzip.NewReader(bytes.NewReader(compressed))
-	require.NoError(t, err)
-	defer zr.Close()
-
-	decompressed, err := io.ReadAll(zr)
-	require.NoError(t, err)
-	assert.Equal(t, originalData, decompressed, "decompressed data must match original")
+	t.Run("returns nil when metrics slice is empty", func(t *testing.T) {
+		sender := NewMetricSender("http://localhost:8080", &mockCompressor{})
+		err := sender.SendAll([]domain.Metrics{})
+		assert.NoError(t, err)
+	})
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/astre-ash/omnigo/internal/agent"
 	"github.com/astre-ash/omnigo/internal/config"
+	"github.com/astre-ash/omnigo/pkg/compress"
 )
 
 func main() {
@@ -21,7 +22,8 @@ func main() {
 	}
 
 	collector := agent.NewCollector()
-	sender := agent.NewMetricSender(cfg.Sender.Address)
+	gz := compress.NewGzipCompressor()
+	sender := agent.NewMetricSender(cfg.Sender.Address, gz)
 	app := agent.NewAgent(cfg.Loop.PollInterval, cfg.Loop.ReportInterval, collector, sender)
 	app.Run(ctx)
 }

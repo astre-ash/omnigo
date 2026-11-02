@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/astre-ash/omnigo/internal/domain"
@@ -24,17 +25,21 @@ type InMemStorage interface {
 type PersistenceManager struct {
 	memStore      InMemStorage
 	persister     Persister
-	storeInterval int
+	storeInterval time.Duration
 	logger        *zap.Logger
+
+	mtx    sync.Mutex
+	wg     sync.WaitGroup
+	cancel context.CancelFunc
 }
 
 func NewPersistenceManager(
 	mem InMemStorage,
 	persister Persister,
-	storeInterval int,
+	storeInterval time.Duration,
 	restore bool,
 	logger *zap.Logger,
-) (*PersistenceManager, service.Storage, error) {
+) (*PersistenceManager, service.Storage) {
 
 	pm := &PersistenceManager{
 		memStore:      mem,
@@ -58,7 +63,7 @@ func NewPersistenceManager(
 		activeStorage = NewSyncStorage(mem, persister)
 	}
 
-	return pm, activeStorage, nil
+	return pm, activeStorage
 }
 
 func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
@@ -66,8 +71,14 @@ func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
 		return
 	}
 
+	flushCtx, cancel := context.WithCancel(ctx)
+	pm.cancel = cancel
+
+	pm.wg.Add(1)
 	go func() {
-		ticker := time.NewTicker(time.Duration(pm.storeInterval) * time.Second)
+		defer pm.wg.Done()
+
+		ticker := time.NewTicker(pm.storeInterval)
 		defer ticker.Stop()
 
 		for {
@@ -76,17 +87,31 @@ func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
 				if err := pm.Flush(); err != nil {
 					pm.logger.Error("failed to periodically dump metrics", zap.Error(err))
 				}
-			case <-ctx.Done():
+			case <-flushCtx.Done():
 				return
 			}
 		}
 	}()
 }
 
+func (pm *PersistenceManager) Stop() error {
+	if pm.cancel != nil {
+		pm.cancel()
+	}
+
+	pm.wg.Wait()
+
+	return pm.Flush()
+}
+
 func (pm *PersistenceManager) Flush() error {
 	if pm.persister == nil {
 		return nil
 	}
+
+	pm.mtx.Lock()
+	defer pm.mtx.Unlock()
+
 	if err := pm.persister.Save(pm.memStore.Snapshot()); err != nil {
 		return fmt.Errorf("failed to flush snapshot: %w", err)
 	}

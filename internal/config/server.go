@@ -3,6 +3,7 @@ package config
 import (
 	"flag"
 	"fmt"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -15,28 +16,44 @@ const (
 )
 
 type ServerConfig struct {
-	Address         string `env:"ADDRESS"`
-	StoreInterval   int    `env:"STORE_INTERVAL"`
-	FileStoragePath string `env:"FILE_STORAGE_PATH"`
-	Restore         bool   `env:"RESTORE"`
+	Address         string        `env:"ADDRESS"`
+	StoreInterval   time.Duration `env:"STORE_INTERVAL"`
+	FileStoragePath string        `env:"FILE_STORAGE_PATH"`
+	Restore         bool          `env:"RESTORE"`
 }
 
 func LoadServerConfig(args []string) (*ServerConfig, error) {
-	var cfg ServerConfig
+	var raw struct {
+		Address         string `env:"ADDRESS"`
+		StoreInterval   int    `env:"STORE_INTERVAL"`
+		FileStoragePath string `env:"FILE_STORAGE_PATH"`
+		Restore         bool   `env:"RESTORE"`
+	}
 
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
-	fs.StringVar(&cfg.Address, "a", defaultServerAddress, "endpoint HTTP server address (host:port)")
-	fs.IntVar(&cfg.StoreInterval, "i", defaultStoreInterval, "interval in seconds to dump metrics to disk (0 for synchronous)")
-	fs.StringVar(&cfg.FileStoragePath, "f", defaultFileStoragePath, "path to file for metrics storage")
-	fs.BoolVar(&cfg.Restore, "r", defaultRestore, "restore previously saved values on startup")
+	fs.StringVar(&raw.Address, "a", defaultServerAddress, "endpoint HTTP server address (host:port)")
+	fs.IntVar(&raw.StoreInterval, "i", defaultStoreInterval, "interval in seconds to dump metrics to disk (0 for synchronous)")
+	fs.StringVar(&raw.FileStoragePath, "f", defaultFileStoragePath, "path to file for metrics storage")
+	fs.BoolVar(&raw.Restore, "r", defaultRestore, "restore previously saved values on startup")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("failed to parse server command-line flags: %w", err)
 	}
 
-	if err := env.Parse(&cfg); err != nil {
+	if err := env.Parse(&raw); err != nil {
 		return nil, fmt.Errorf("failed to parse server environment variables: %w", err)
 	}
 
-	return &cfg, nil
+	if raw.StoreInterval < 0 {
+		return nil, fmt.Errorf("store interval must be non-negative, got %d", raw.StoreInterval)
+	}
+
+	cfg := &ServerConfig{
+		Address:         raw.Address,
+		StoreInterval:   time.Duration(raw.StoreInterval) * time.Second,
+		FileStoragePath: raw.FileStoragePath,
+		Restore:         raw.Restore,
+	}
+
+	return cfg, nil
 }

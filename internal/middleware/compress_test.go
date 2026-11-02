@@ -53,7 +53,28 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	t.Run("compresses response if client accepts gzip and content-type matches", func(t *testing.T) {
+	t.Run("passes through uncompressed inbound request body unchanged", func(t *testing.T) {
+		expectedBody := `{"id":"poll_count",
+		"type":"counter",
+		"delta":10,
+		}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.Equal(t, expectedBody, string(body))
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(expectedBody)))
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("compresses response if client accepts gzip and content-type is application/json", func(t *testing.T) {
 		jsonResponse := `{"status":"ok"}`
 
 		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +95,85 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, jsonResponse, string(decompressed))
 	})
 
+	t.Run("compresses response if client accepts gzip and content-type is text/html", func(t *testing.T) {
+		htmlResponse := `<html><body><h1>Metrics</h1></body></html>`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(htmlResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+
+		decompressed := gzipDecompress(t, rec.Body.Bytes())
+		assert.Equal(t, htmlResponse, string(decompressed))
+	})
+
+	t.Run("compresses response when content-type has charset parameter", func(t *testing.T) {
+		jsonResponse := `{"metric":"Alloc"}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			_, _ = w.Write([]byte(jsonResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+
+		decompressed := gzipDecompress(t, rec.Body.Bytes())
+		assert.Equal(t, jsonResponse, string(decompressed))
+	})
+
+	t.Run("compresses response when Accept-Encoding contains multiple encodings", func(t *testing.T) {
+		jsonResponse := `{"status":"ok"}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(jsonResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "deflate, gzip, br")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+	})
+
+	t.Run("does not compress response if client does not accept gzip", func(t *testing.T) {
+		jsonResponse := `{"status":"ok"}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(jsonResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Header().Get("Content-Encoding"))
+		assert.Equal(t, jsonResponse, rec.Body.String())
+	})
+
 	t.Run("does not compress response if content-type is text/plain", func(t *testing.T) {
 		plainResponse := "plain text data"
 
@@ -91,5 +191,27 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Empty(t, rec.Header().Get("Content-Encoding"))
 		assert.Equal(t, plainResponse, rec.Body.String())
+	})
+
+	t.Run("preserves non-200 HTTP status code when compressing response", func(t *testing.T) {
+		errorResponse := `{"error":"not found"}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(errorResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+
+		decompressed := gzipDecompress(t, rec.Body.Bytes())
+		assert.Equal(t, errorResponse, string(decompressed))
 	})
 }

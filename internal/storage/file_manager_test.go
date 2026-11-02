@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,22 +26,22 @@ func TestNewFileManager(t *testing.T) {
 func TestFileManager_EmptyPath(t *testing.T) {
 	fm := NewFileManager("")
 
-	t.Run("write with empty path is no-op", func(t *testing.T) {
+	t.Run("save with empty path is no-op", func(t *testing.T) {
 		metrics := []domain.Metrics{
 			{ID: "Alloc", MType: domain.TypeGauge, Value: toPtr(12.34)},
 		}
 		err := fm.Save(metrics)
-		assert.NoError(t, err, "write must succeed as no-op when path is empty")
+		assert.NoError(t, err, "save must succeed as no-op when path is empty")
 	})
 
-	t.Run("read with empty path returns nil", func(t *testing.T) {
+	t.Run("load with empty path returns nil", func(t *testing.T) {
 		metrics, err := fm.Load()
-		assert.NoError(t, err, "read must succeed as no-op when path is empty")
+		assert.NoError(t, err, "load must succeed as no-op when path is empty")
 		assert.Nil(t, metrics)
 	})
 }
 
-func TestFileManager_WriteAndRead_Success(t *testing.T) {
+func TestFileManager_SaveAndLoad_Success(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	filePath := filepath.Join(tmpDir, "nested", "dir", "metrics.json")
@@ -60,20 +61,20 @@ func TestFileManager_WriteAndRead_Success(t *testing.T) {
 	}
 
 	err := fm.Save(expectedMetrics)
-	require.NoError(t, err, "failed to write metrics")
-	require.FileExists(t, filePath, "target file must exist after write")
+	require.NoError(t, err, "failed to save metrics")
+	require.FileExists(t, filePath, "target file must exist after save")
 
 	data, err := os.ReadFile(filePath)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "\n  ", "file content should be indented JSON")
 
 	actualMetrics, err := fm.Load()
-	require.NoError(t, err, "failed to read metrics")
+	require.NoError(t, err, "failed to load metrics")
 	require.Len(t, actualMetrics, 2)
-	assert.Equal(t, expectedMetrics, actualMetrics, "read metrics must match written metrics")
+	assert.Equal(t, expectedMetrics, actualMetrics, "loaded metrics must match saved metrics")
 }
 
-func TestFileManager_Read_NonExistentFile(t *testing.T) {
+func TestFileManager_Load_NonExistentFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "not_found.json")
 	fm := NewFileManager(filePath)
@@ -83,7 +84,7 @@ func TestFileManager_Read_NonExistentFile(t *testing.T) {
 	assert.Nil(t, metrics, "metrics should be nil when file does not exist")
 }
 
-func TestFileManager_Read_EmptyFile(t *testing.T) {
+func TestFileManager_Load_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "empty.json")
 
@@ -96,7 +97,7 @@ func TestFileManager_Read_EmptyFile(t *testing.T) {
 	assert.Nil(t, metrics, "metrics should be nil when file is empty")
 }
 
-func TestFileManager_Read_CorruptedJSON(t *testing.T) {
+func TestFileManager_Load_CorruptedJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "corrupted.json")
 
@@ -110,21 +111,7 @@ func TestFileManager_Read_CorruptedJSON(t *testing.T) {
 	assert.Nil(t, metrics)
 }
 
-func TestFileManager_Write_Error(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	fm := NewFileManager(tmpDir)
-
-	metrics := []domain.Metrics{
-		{ID: "Alloc", MType: domain.TypeGauge, Value: toPtr(100.0)},
-	}
-
-	err := fm.Save(metrics)
-	require.Error(t, err, "writing to a directory path should fail")
-	assert.Contains(t, err.Error(), "failed to write metrics to file")
-}
-
-func TestFileManager_Read_Error(t *testing.T) {
+func TestFileManager_Load_Error(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	fm := NewFileManager(tmpDir)
@@ -133,4 +120,50 @@ func TestFileManager_Read_Error(t *testing.T) {
 	require.Error(t, err, "reading a directory path should fail")
 	assert.Contains(t, err.Error(), "failed to read storage file")
 	assert.Nil(t, metrics)
+}
+
+func TestFileManager_Save_Error(t *testing.T) {
+	t.Run("fails when target is an existing directory (rename fails)", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		fm := NewFileManager(tmpDir)
+
+		metrics := []domain.Metrics{
+			{ID: "Alloc",
+				MType: domain.TypeGauge,
+				Value: toPtr(100.0),
+			},
+		}
+
+		err := fm.Save(metrics)
+		require.Error(t, err, "saving over a directory path should fail")
+		assert.Contains(t, err.Error(), "failed to rename temp file to target")
+	})
+
+	t.Run("fails when directory cannot be created", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		blockingFile := filepath.Join(tmpDir, "file_blocking_dir")
+		require.NoError(t, os.WriteFile(blockingFile, []byte("blocker"), 0644))
+
+		fm := NewFileManager(filepath.Join(blockingFile, "sub", "metrics.json"))
+
+		err := fm.Save([]domain.Metrics{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create directory")
+	})
+
+	t.Run("fails when metrics cannot be marshaled", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		filePath := filepath.Join(tmpDir, "metrics.json")
+		fm := NewFileManager(filePath)
+
+		nanVal := math.NaN()
+		metrics := []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: &nanVal},
+		}
+
+		err := fm.Save(metrics)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to marshal metrics")
+	})
 }
