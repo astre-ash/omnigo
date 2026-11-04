@@ -40,12 +40,15 @@ func (s *MetricSender) Send(m domain.Metrics) error {
 	}
 
 	var body io.Reader
+	isCompessed := false
+
 	if s.compressor != nil {
 		compressedData, err := s.compressor.Compress(data)
 		if err != nil {
 			return fmt.Errorf("failed to compress metric payload: %w", err)
 		}
 		body = bytes.NewReader(compressedData)
+		isCompessed = true
 	} else {
 		body = bytes.NewReader(data)
 	}
@@ -56,8 +59,11 @@ func (s *MetricSender) Send(m domain.Metrics) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Encoding", "gzip")
 	req.Header.Set("Accept-Encoding", "gzip")
+
+	if isCompessed {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

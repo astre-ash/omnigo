@@ -26,7 +26,7 @@ func int64Ptr(v int64) *int64 {
 	return &v
 }
 
-func decompressBody(r io.Reader) ([]byte, error) {
+func decompressGzip(r io.Reader) ([]byte, error) {
 	zr, err := gzip.NewReader(r)
 	if err != nil {
 		return nil, err
@@ -75,7 +75,7 @@ func TestMetricSender_Send(t *testing.T) {
 			receivedAcceptEncoding = r.Header.Get("Accept-Encoding")
 
 			var err error
-			decompressedBody, err = decompressBody(r.Body)
+			decompressedBody, err = decompressGzip(r.Body)
 			if err != nil {
 				http.Error(w, "failed to decompress gzip body", http.StatusBadRequest)
 				return
@@ -93,24 +93,35 @@ func TestMetricSender_Send(t *testing.T) {
 		}
 
 		err := sender.Send(metric)
-		require.NoError(t, err, "send should succeed when server returns 200 OK")
+		require.NoError(t, err)
 
-		assert.Equal(t, http.MethodPost, receivedMethod, "HTTP method must be POST")
-		assert.Equal(t, "/update/", receivedPath, "request path mismatch")
-		assert.Equal(t, "application/json", receivedContentType, "content-type header must be application/json")
-		assert.Equal(t, "gzip", receivedContentEncoding, "content-encoding header must be gzip")
-		assert.Equal(t, "gzip", receivedAcceptEncoding, "accept-encoding header must be gzip")
+		assert.Equal(t, http.MethodPost, receivedMethod)
+		assert.Equal(t, "/update/", receivedPath)
+		assert.Equal(t, "application/json", receivedContentType)
+		assert.Equal(t, "gzip", receivedContentEncoding)
+		assert.Equal(t, "gzip", receivedAcceptEncoding)
 
 		var actualMetric domain.Metrics
 		err = json.Unmarshal(decompressedBody, &actualMetric)
-		require.NoError(t, err, "decompressed body should be valid JSON")
-		assert.Equal(t, metric, actualMetric, "sent and received metrics must match")
+		require.NoError(t, err)
+		assert.Equal(t, metric, actualMetric)
 	})
 
 	t.Run("successful request without compressor sends uncompressed body", func(t *testing.T) {
-		var receivedBody []byte
+		var (
+			receivedMethod          string
+			receivedContentType     string
+			receivedContentEncoding string
+			receivedAcceptEncoding  string
+			receivedBody            []byte
+		)
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			receivedMethod = r.Method
+			receivedContentType = r.Header.Get("Content-Type")
+			receivedContentEncoding = r.Header.Get("Content-Encoding")
+			receivedAcceptEncoding = r.Header.Get("Accept-Encoding")
+
 			var err error
 			receivedBody, err = io.ReadAll(r.Body)
 			if err != nil {
@@ -130,6 +141,11 @@ func TestMetricSender_Send(t *testing.T) {
 
 		err := sender.Send(metric)
 		require.NoError(t, err)
+
+		assert.Equal(t, http.MethodPost, receivedMethod)
+		assert.Equal(t, "application/json", receivedContentType)
+		assert.Empty(t, receivedContentEncoding, "Content-Encoding should not be set when compressor is nil")
+		assert.Equal(t, "gzip", receivedAcceptEncoding)
 
 		var actualMetric domain.Metrics
 		err = json.Unmarshal(receivedBody, &actualMetric)
@@ -172,6 +188,19 @@ func TestMetricSender_Send(t *testing.T) {
 		assert.Contains(t, err.Error(), "failed to marshal metric")
 	})
 
+	t.Run("returns error when request creation fails", func(t *testing.T) {
+		sender := NewMetricSender("http://localhost\x7f:8080", nil)
+		metric := domain.Metrics{
+			ID:    "Alloc",
+			MType: "gauge",
+			Value: float64Ptr(100),
+		}
+
+		err := sender.Send(metric)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to create request")
+	})
+
 	t.Run("returns error when server responds with non-200 status", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
@@ -186,7 +215,7 @@ func TestMetricSender_Send(t *testing.T) {
 		}
 
 		err := sender.Send(metric)
-		require.Error(t, err, "expected error when server responds with 400")
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unexpected status code: 400")
 	})
 
@@ -202,7 +231,7 @@ func TestMetricSender_Send(t *testing.T) {
 		}
 
 		err := sender.Send(metric)
-		require.Error(t, err, "expected error when server is down")
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "request failed")
 	})
 }
@@ -220,18 +249,16 @@ func TestMetricSender_SendAll(t *testing.T) {
 			defer mtx.Unlock()
 
 			assert.Equal(t, "gzip", r.Header.Get("Content-Encoding"))
-
 			receivedPaths = append(receivedPaths, r.URL.Path)
 
-			zr, err := gzip.NewReader(r.Body)
+			decompressed, err := decompressGzip(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			defer zr.Close()
 
 			var m domain.Metrics
-			if err := json.NewDecoder(zr).Decode(&m); err != nil {
+			if err := json.Unmarshal(decompressed, &m); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
@@ -256,22 +283,29 @@ func TestMetricSender_SendAll(t *testing.T) {
 		}
 
 		err := sender.SendAll(metrics)
-		require.NoError(t, err, "SendAll should succeed without errors")
+		require.NoError(t, err)
 
 		mtx.Lock()
 		defer mtx.Unlock()
 
-		require.Len(t, receivedMetrics, 2, "server must receive exactly 2 requests")
+		require.Len(t, receivedMetrics, 2)
 		assert.Equal(t, []string{"/update/", "/update/"}, receivedPaths)
-		assert.Equal(t, metrics, receivedMetrics, "received metrics must match sent metrics")
+		assert.Equal(t, metrics, receivedMetrics)
 	})
 
-	t.Run("returns error when one of metrics fails to send", func(t *testing.T) {
-		var callCount int
+	t.Run("aborts and returns error when a metric fails to send", func(t *testing.T) {
+		var (
+			mtx       sync.Mutex
+			callCount int
+		)
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mtx.Lock()
 			callCount++
-			if callCount == 2 {
+			current := callCount
+			mtx.Unlock()
+
+			if current == 2 {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
@@ -283,17 +317,23 @@ func TestMetricSender_SendAll(t *testing.T) {
 		metrics := []domain.Metrics{
 			{ID: "Alloc", MType: "gauge", Value: float64Ptr(100.5)},
 			{ID: "PollCount", MType: "counter", Delta: int64Ptr(1)},
+			{ID: "Frees", MType: "gauge", Value: float64Ptr(200.0)},
 		}
 
 		err := sender.SendAll(metrics)
-		require.Error(t, err, "SendAll should return an error if a request fails")
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to send metric PollCount (counter)")
 		assert.Contains(t, err.Error(), "unexpected status code: 500")
+
+		mtx.Lock()
+		assert.Equal(t, 2, callCount, "should stop sending immediately on first error")
+		mtx.Unlock()
 	})
 
-	t.Run("returns nil when metrics slice is empty", func(t *testing.T) {
+	t.Run("returns nil when metrics slice is empty or nil", func(t *testing.T) {
 		sender := NewMetricSender("http://localhost:8080", &mockCompressor{})
-		err := sender.SendAll([]domain.Metrics{})
-		assert.NoError(t, err)
+
+		assert.NoError(t, sender.SendAll([]domain.Metrics{}))
+		assert.NoError(t, sender.SendAll(nil))
 	})
 }
