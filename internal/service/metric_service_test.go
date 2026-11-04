@@ -2,22 +2,27 @@ package service
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
 type mockStorage struct {
-	// Spy fields for Updates.
-	gaugeName   string
-	gaugeVal    float64
-	gaugeCalled bool
+	// Spy. Stub fields for UpdateGauge.
+	gaugeName      string
+	gaugeVal       float64
+	gaugeCalled    bool
+	updateGaugeErr error
 
-	counterName   string
-	counterVal    int64
-	counterCalled bool
+	// Spy. Stub fields for UpdateCounter.
+	counterName      string
+	counterVal       int64
+	counterCalled    bool
+	updateCounterErr error
 
 	// Stub fields for GetGauge.
 	getGaugeVal float64
@@ -32,16 +37,18 @@ type mockStorage struct {
 	allCounters map[string]int64
 }
 
-func (m *mockStorage) UpdateGauge(name string, value float64) {
+func (m *mockStorage) UpdateGauge(name string, value float64) error {
 	m.gaugeName = name
 	m.gaugeVal = value
 	m.gaugeCalled = true
+	return m.updateGaugeErr
 }
 
-func (m *mockStorage) UpdateCounter(name string, value int64) {
+func (m *mockStorage) UpdateCounter(name string, value int64) error {
 	m.counterName = name
 	m.counterVal = value
 	m.counterCalled = true
+	return m.updateCounterErr
 }
 
 func (m *mockStorage) GetGauge(name string) (float64, error) {
@@ -60,6 +67,190 @@ func (m *mockStorage) GetAllCounters() map[string]int64 {
 	return m.allCounters
 }
 
+func TestMetricService_UpdateMetric(t *testing.T) {
+	errStorage := errors.New("storage update failed")
+
+	t.Run("success: gauge metric updated", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		req := domain.Metrics{
+			ID:    "alloc",
+			MType: domain.TypeGauge,
+			Value: float64Ptr(123.45),
+		}
+
+		res, err := svc.UpdateMetric(req)
+		require.NoError(t, err)
+		assert.Equal(t, req.ID, res.ID)
+		assert.Equal(t, req.MType, res.MType)
+		require.NotNil(t, res.Value)
+		assert.Equal(t, 123.45, *res.Value)
+
+		assert.True(t, mock.gaugeCalled)
+		assert.Equal(t, "alloc", mock.gaugeName)
+		assert.Equal(t, 123.45, mock.gaugeVal)
+	})
+
+	t.Run("success: counter metric updated and returned accumulated value", func(t *testing.T) {
+		mock := &mockStorage{
+			getCounterVal: 15,
+		}
+		svc := NewMetricService(mock)
+
+		req := domain.Metrics{
+			ID:    "pollCount",
+			MType: domain.TypeCounter,
+			Delta: int64Ptr(5),
+		}
+
+		res, err := svc.UpdateMetric(req)
+		require.NoError(t, err)
+		assert.Equal(t, req.ID, res.ID)
+		assert.Equal(t, req.MType, res.MType)
+		require.NotNil(t, res.Delta)
+
+		assert.Equal(t, int64(15), *res.Delta)
+
+		assert.True(t, mock.counterCalled)
+		assert.Equal(t, "pollCount", mock.counterName)
+		assert.Equal(t, int64(5), mock.counterVal)
+	})
+
+	t.Run("failure: gauge validation errors", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			value *float64
+		}{
+			{name: "nil value", value: nil},
+			{name: "NaN value", value: float64Ptr(math.NaN())},
+			{name: "+Inf value", value: float64Ptr(math.Inf(1))},
+			{name: "-Inf value", value: float64Ptr(math.Inf(-1))},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				mock := &mockStorage{}
+				svc := NewMetricService(mock)
+
+				_, err := svc.UpdateMetric(domain.Metrics{
+					ID:    "alloc",
+					MType: domain.TypeGauge,
+					Value: tc.value,
+				})
+
+				assert.ErrorIs(t, err, domain.ErrInvalidValue)
+				assert.False(t, mock.gaugeCalled)
+			})
+		}
+	})
+
+	t.Run("failure: counter validation error (nil delta)", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		_, err := svc.UpdateMetric(domain.Metrics{
+			ID:    "pollCount",
+			MType: domain.TypeCounter,
+			Delta: nil,
+		})
+
+		assert.ErrorIs(t, err, domain.ErrInvalidValue)
+		assert.False(t, mock.counterCalled)
+	})
+
+	t.Run("failure: unknown metric type", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		_, err := svc.UpdateMetric(domain.Metrics{
+			ID:    "temp",
+			MType: "histogram",
+		})
+
+		assert.ErrorIs(t, err, domain.ErrUnknownMetricType)
+	})
+
+	t.Run("failure: storage update error on gauge", func(t *testing.T) {
+		mock := &mockStorage{updateGaugeErr: errStorage}
+		svc := NewMetricService(mock)
+
+		_, err := svc.UpdateMetric(domain.Metrics{
+			ID:    "alloc",
+			MType: domain.TypeGauge,
+			Value: float64Ptr(10.0),
+		})
+
+		assert.ErrorIs(t, err, errStorage)
+	})
+
+	t.Run("failure: storage get error on counter after update", func(t *testing.T) {
+		mock := &mockStorage{getCounterErr: errors.New("read error")}
+		svc := NewMetricService(mock)
+
+		_, err := svc.UpdateMetric(domain.Metrics{
+			ID:    "pollCount",
+			MType: domain.TypeCounter,
+			Delta: int64Ptr(5),
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "read error")
+	})
+}
+
+func TestMetricService_GetMetric(t *testing.T) {
+	errStorageFailure := errors.New("storage read failed")
+
+	t.Run("success: gauge metric found and filled", func(t *testing.T) {
+		mock := &mockStorage{getGaugeVal: 123.456}
+		svc := NewMetricService(mock)
+
+		res, err := svc.GetMetric(domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
+		require.NoError(t, err)
+		assert.Equal(t, "alloc", res.ID)
+		assert.Equal(t, domain.TypeGauge, res.MType)
+		require.NotNil(t, res.Value)
+		assert.Equal(t, 123.456, *res.Value)
+	})
+
+	t.Run("success: counter metric found and filled", func(t *testing.T) {
+		mock := &mockStorage{getCounterVal: 42}
+		svc := NewMetricService(mock)
+
+		res, err := svc.GetMetric(domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
+		require.NoError(t, err)
+		assert.Equal(t, "pollCount", res.ID)
+		assert.Equal(t, domain.TypeCounter, res.MType)
+		require.NotNil(t, res.Delta)
+		assert.Equal(t, int64(42), *res.Delta)
+	})
+
+	t.Run("failure: storage error on gauge", func(t *testing.T) {
+		mock := &mockStorage{getGaugeErr: errStorageFailure}
+		svc := NewMetricService(mock)
+
+		_, err := svc.GetMetric(domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
+		assert.ErrorIs(t, err, errStorageFailure)
+	})
+
+	t.Run("failure: storage error on counter", func(t *testing.T) {
+		mock := &mockStorage{getCounterErr: errStorageFailure}
+		svc := NewMetricService(mock)
+
+		_, err := svc.GetMetric(domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
+		assert.ErrorIs(t, err, errStorageFailure)
+	})
+
+	t.Run("failure: unknown metric type", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		_, err := svc.GetMetric(domain.Metrics{ID: "test", MType: "unknown"})
+		assert.ErrorIs(t, err, domain.ErrUnknownMetricType)
+	})
+}
+
 func TestMetricService_Update(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -69,7 +260,6 @@ func TestMetricService_Update(t *testing.T) {
 		expectedErr  error
 		validateMock func(t *testing.T, m *mockStorage)
 	}{
-		// Success cases.
 		{
 			name:        "success: valid gauge with float",
 			metricType:  domain.TypeGauge,
@@ -107,8 +297,6 @@ func TestMetricService_Update(t *testing.T) {
 				assert.False(t, m.gaugeCalled)
 			},
 		},
-
-		// Gauge validation errors.
 		{
 			name:        "failure: gauge with text value",
 			metricType:  domain.TypeGauge,
@@ -137,8 +325,6 @@ func TestMetricService_Update(t *testing.T) {
 			metricValue: "-Inf",
 			expectedErr: domain.ErrInvalidValue,
 		},
-
-		// Counter validation errors.
 		{
 			name:        "failure: counter with float value",
 			metricType:  domain.TypeCounter,
@@ -153,8 +339,6 @@ func TestMetricService_Update(t *testing.T) {
 			metricValue: "invalid",
 			expectedErr: domain.ErrInvalidValue,
 		},
-
-		// Unknown metric type.
 		{
 			name:        "failure: unknown metric type",
 			metricType:  "histogram",
@@ -281,4 +465,12 @@ func TestMetricService_GetAll(t *testing.T) {
 
 	assert.Equal(t, expectedGauges, gauges, "gauges map mismatch")
 	assert.Equal(t, expectedCounters, counters, "counters map mismatch")
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }

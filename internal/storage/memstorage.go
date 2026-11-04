@@ -20,16 +20,18 @@ func NewMemStorage() *MemStorage {
 
 }
 
-func (s *MemStorage) UpdateGauge(name string, value float64) {
+func (s *MemStorage) UpdateGauge(name string, value float64) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.gauges[name] = value
+	return nil
 }
 
-func (s *MemStorage) UpdateCounter(name string, value int64) {
+func (s *MemStorage) UpdateCounter(name string, value int64) error {
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.counters[name] += value
+	return nil
 }
 
 func (s *MemStorage) GetGauge(name string) (float64, error) {
@@ -72,4 +74,46 @@ func (s *MemStorage) GetAllCounters() map[string]int64 {
 		copyMap[k] = v
 	}
 	return copyMap
+}
+
+func (s *MemStorage) Snapshot() []domain.Metrics {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	metrics := make([]domain.Metrics, 0, len(s.gauges)+len(s.counters))
+	for name, val := range s.gauges {
+		v := val
+		metrics = append(metrics, domain.Metrics{
+			ID:    name,
+			MType: "gauge",
+			Value: &v,
+		})
+	}
+	for name, delta := range s.counters {
+		d := delta
+		metrics = append(metrics, domain.Metrics{
+			ID:    name,
+			MType: "counter",
+			Delta: &d,
+		})
+	}
+	return metrics
+}
+
+func (s *MemStorage) Restore(metrics []domain.Metrics) {
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	for _, m := range metrics {
+		switch m.MType {
+		case domain.TypeGauge:
+			if m.Value != nil {
+				s.gauges[m.ID] = *m.Value
+			}
+		case domain.TypeCounter:
+			if m.Delta != nil {
+				s.counters[m.ID] = *m.Delta
+			}
+		}
+	}
 }

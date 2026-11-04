@@ -9,8 +9,8 @@ import (
 )
 
 type Storage interface {
-	UpdateGauge(name string, value float64)
-	UpdateCounter(name string, value int64)
+	UpdateGauge(name string, value float64) error
+	UpdateCounter(name string, value int64) error
 	GetGauge(name string) (float64, error)
 	GetCounter(name string) (int64, error)
 	GetAllGauges() map[string]float64
@@ -23,6 +23,66 @@ type MetricService struct {
 
 func NewMetricService(storage Storage) *MetricService {
 	return &MetricService{storage: storage}
+
+}
+
+func (s *MetricService) GetMetric(m domain.Metrics) (domain.Metrics, error) {
+	switch m.MType {
+	case domain.TypeGauge:
+		val, err := s.storage.GetGauge(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+		m.Value = &val
+		return m, nil
+
+	case domain.TypeCounter:
+		val, err := s.storage.GetCounter(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+		m.Delta = &val
+		return m, nil
+
+	default:
+		return domain.Metrics{}, fmt.Errorf("%w: '%s'", domain.ErrUnknownMetricType, m.MType)
+	}
+}
+
+func (s *MetricService) UpdateMetric(m domain.Metrics) (domain.Metrics, error) {
+	switch m.MType {
+	case domain.TypeGauge:
+		if m.Value == nil || math.IsNaN(*m.Value) || math.IsInf(*m.Value, 0) {
+			return domain.Metrics{}, domain.ErrInvalidValue
+		}
+		if err := s.storage.UpdateGauge(m.ID, *m.Value); err != nil {
+			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
+		}
+
+		return m, nil
+
+	case domain.TypeCounter:
+		if m.Delta == nil {
+			return domain.Metrics{}, domain.ErrInvalidValue
+		}
+
+		if err := s.storage.UpdateCounter(m.ID, *m.Delta); err != nil {
+			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
+		}
+
+		actualVal, err := s.storage.GetCounter(m.ID)
+		if err != nil {
+			return domain.Metrics{}, err
+		}
+
+		m.Delta = &actualVal
+		return m, nil
+
+	default:
+		return domain.Metrics{}, fmt.Errorf("%w: '%s'", domain.ErrUnknownMetricType, m.MType)
+
+	}
+
 }
 
 func (s *MetricService) Update(metricType, name, valueStr string) error {
