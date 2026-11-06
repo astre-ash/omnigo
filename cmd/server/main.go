@@ -13,6 +13,7 @@ import (
 	"github.com/astre-ash/omnigo/internal/server"
 	"github.com/astre-ash/omnigo/internal/service"
 	"github.com/astre-ash/omnigo/internal/storage"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
 
@@ -38,6 +39,25 @@ func run(ctx context.Context) error {
 	defer func() {
 		_ = logger.Sync()
 	}()
+
+	var pinger handler.Pinger
+	if cfg.DatabaseDSN != "" {
+		poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseDSN)
+		if err != nil {
+			logger.Error("failed to parse database DSN", zap.Error(err))
+		} else {
+			pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+			if err != nil {
+				logger.Error("failed to create db connection pool", zap.Error(err))
+			} else {
+				defer pool.Close()
+				pinger = pool
+				logger.Info("database pool initialized successfully")
+			}
+		}
+	} else {
+		logger.Info("database DSN is empty, running without DB")
+	}
 
 	memStore := storage.NewMemStorage()
 
@@ -66,7 +86,9 @@ func run(ctx context.Context) error {
 
 	metricService := service.NewMetricService(store)
 	metricHandler := handler.NewMetricHandler(metricService, logger)
-	srv := server.NewServer(cfg.Address, metricHandler, logger)
+	pingHandler := handler.NewPingHandler(pinger, logger)
+
+	srv := server.NewServer(cfg.Address, metricHandler, pingHandler, logger)
 
 	logger.Info("server starting",
 		zap.String("addr", cfg.Address),
