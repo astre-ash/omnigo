@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/astre-ash/omnigo/internal/domain"
@@ -28,8 +29,8 @@ func NewSyncStorage(mem MemoryStorage, fm SnapshotWriter) *SyncStorage {
 	}
 }
 
-func (s *SyncStorage) UpdateGauge(name string, value float64) error {
-	if err := s.MemoryStorage.UpdateGauge(name, value); err != nil {
+func (s *SyncStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := s.MemoryStorage.UpdateGauge(ctx, name, value); err != nil {
 		return err
 	}
 
@@ -39,8 +40,8 @@ func (s *SyncStorage) UpdateGauge(name string, value float64) error {
 	return nil
 }
 
-func (s *SyncStorage) UpdateCounter(name string, value int64) error {
-	if err := s.MemoryStorage.UpdateCounter(name, value); err != nil {
+func (s *SyncStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := s.MemoryStorage.UpdateCounter(ctx, name, value); err != nil {
 		return err
 	}
 

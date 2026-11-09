@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,7 @@ type mockMetricService struct {
 
 	allGauges   map[string]float64
 	allCounters map[string]int64
+	allErr      error
 
 	updateMetricReq    domain.Metrics
 	updateMetricRes    domain.Metrics
@@ -43,7 +45,7 @@ type mockMetricService struct {
 	getMetricCalled bool
 }
 
-func (m *mockMetricService) Update(metricType, name, valueStr string) error {
+func (m *mockMetricService) Update(ctx context.Context, metricType, name, valueStr string) error {
 	m.updateType = metricType
 	m.updateName = name
 	m.updateVal = valueStr
@@ -51,24 +53,24 @@ func (m *mockMetricService) Update(metricType, name, valueStr string) error {
 	return m.updateErr
 }
 
-func (m *mockMetricService) Get(metricType, name string) (string, error) {
+func (m *mockMetricService) Get(ctx context.Context, metricType, name string) (string, error) {
 	m.getType = metricType
 	m.getName = name
 	m.getCalled = true
 	return m.getVal, m.getErr
 }
 
-func (m *mockMetricService) GetAll() (map[string]float64, map[string]int64) {
-	return m.allGauges, m.allCounters
+func (m *mockMetricService) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	return m.allGauges, m.allCounters, m.allErr
 }
 
-func (m *mockMetricService) UpdateMetric(req domain.Metrics) (domain.Metrics, error) {
+func (m *mockMetricService) UpdateMetric(ctx context.Context, req domain.Metrics) (domain.Metrics, error) {
 	m.updateMetricReq = req
 	m.updateMetricCalled = true
 	return m.updateMetricRes, m.updateMetricErr
 }
 
-func (m *mockMetricService) GetMetric(req domain.Metrics) (domain.Metrics, error) {
+func (m *mockMetricService) GetMetric(ctx context.Context, req domain.Metrics) (domain.Metrics, error) {
 	m.getMetricReq = req
 	m.getMetricCalled = true
 	return m.getMetricRes, m.getMetricErr
@@ -401,24 +403,43 @@ func TestMetricHandler_GetValue(t *testing.T) {
 }
 
 func TestMetricHandler_GetAll(t *testing.T) {
-	mock := &mockMetricService{
-		allGauges:   map[string]float64{"alloc": 10.5},
-		allCounters: map[string]int64{"poll": 3},
-	}
+	t.Run("success: renders metrics template", func(t *testing.T) {
+		mock := &mockMetricService{
+			allGauges:   map[string]float64{"alloc": 10.5},
+			allCounters: map[string]int64{"poll": 3},
+		}
 
-	handler := NewMetricHandler(mock, zap.NewNop())
-	router := setupTestRouter(handler)
+		handler := NewMetricHandler(mock, zap.NewNop())
+		router := setupTestRouter(handler)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
 
-	router.ServeHTTP(rec, req)
+		router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code, "expected HTTP 200 OK")
-	assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Equal(t, http.StatusOK, rec.Code, "expected HTTP 200 OK")
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
 
-	body := rec.Body.String()
-	require.NotEmpty(t, body, "HTML body must not be empty")
-	assert.Contains(t, body, "alloc", "HTML should contain gauge name")
-	assert.Contains(t, body, "poll", "HTML should contain counter name")
+		body := rec.Body.String()
+		require.NotEmpty(t, body, "HTML body must not be empty")
+		assert.Contains(t, body, "alloc", "HTML should contain gauge name")
+		assert.Contains(t, body, "poll", "HTML should contain counter name")
+	})
+
+	t.Run("failure: service returns error mapped to 500", func(t *testing.T) {
+		mock := &mockMetricService{
+			allErr: errors.New("failed to retrieve metrics"),
+		}
+
+		handler := NewMetricHandler(mock, zap.NewNop())
+		router := setupTestRouter(handler)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Contains(t, rec.Body.String(), http.StatusText(http.StatusInternalServerError))
+	})
 }

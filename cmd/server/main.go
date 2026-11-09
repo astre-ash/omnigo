@@ -13,7 +13,7 @@ import (
 	"github.com/astre-ash/omnigo/internal/server"
 	"github.com/astre-ash/omnigo/internal/service"
 	"github.com/astre-ash/omnigo/internal/storage"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/astre-ash/omnigo/internal/storage/postgres"
 	"go.uber.org/zap"
 )
 
@@ -36,53 +36,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize zap logger: %w", err)
 	}
-	defer func() {
-		_ = logger.Sync()
-	}()
+	defer func() { _ = logger.Sync() }()
 
-	var pinger handler.Pinger
-	if cfg.DatabaseDSN != "" {
-		poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseDSN)
-		if err != nil {
-			logger.Error("failed to parse database DSN", zap.Error(err))
-		} else {
-			pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-			if err != nil {
-				logger.Error("failed to create db connection pool", zap.Error(err))
-			} else {
-				defer pool.Close()
-				pinger = pool
-				logger.Info("database pool initialized successfully")
-			}
-		}
-	} else {
-		logger.Info("database DSN is empty, running without DB")
+	store, pinger, cleanup, err := initStorage(ctx, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("failed to initialize storage: %w", err)
 	}
-
-	memStore := storage.NewMemStorage()
-
-	var persister storage.Persister
-	if cfg.FileStoragePath != "" {
-		persister = storage.NewFileManager(cfg.FileStoragePath)
-	}
-
-	pm, store := storage.NewPersistenceManager(
-		memStore,
-		persister,
-		cfg.StoreInterval,
-		cfg.Restore,
-		logger,
-	)
-
-	defer func() {
-		if err := pm.Stop(); err != nil {
-			logger.Error("failed to stop persistence manager and dump metrics", zap.Error(err))
-		} else if cfg.FileStoragePath != "" {
-			logger.Info("metrics saved successfully on shutdown")
-		}
-	}()
-
-	pm.StartAsyncFlush(ctx)
+	defer cleanup()
 
 	metricService := service.NewMetricService(store)
 	metricHandler := handler.NewMetricHandler(metricService, logger)
@@ -90,17 +50,54 @@ func run(ctx context.Context) error {
 
 	srv := server.NewServer(cfg.Address, metricHandler, pingHandler, logger)
 
-	logger.Info("server starting",
-		zap.String("addr", cfg.Address),
-		zap.Duration("store_interval", cfg.StoreInterval),
-		zap.String("file_storage_path", cfg.FileStoragePath),
-		zap.Bool("restore", cfg.Restore),
-	)
+	logger.Info("starting HTTP server", zap.String("addr", cfg.Address))
+	return srv.Run(ctx)
+}
 
-	if err := srv.Run(ctx); err != nil {
-		return fmt.Errorf("http server runtime error: %w", err)
+func initStorage(
+	ctx context.Context,
+	cfg *config.ServerConfig,
+	logger *zap.Logger,
+) (store service.Storage, pinger handler.Pinger, closeFunc func(), err error) {
+
+	if cfg.DatabaseDSN != "" {
+		logger.Info("using PostgreSQL as metrics storage", zap.String("dsn", cfg.DatabaseDSN))
+		pgStore, err := postgres.New(ctx, cfg.DatabaseDSN, logger)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to init postgres: %w", err)
+		}
+
+		return pgStore, pgStore, pgStore.Close, nil
 	}
 
-	logger.Info("server exited cleanly")
-	return nil
+	memStore := storage.NewMemStorage()
+
+	if cfg.FileStoragePath != "" {
+		logger.Info("using File Storage as persistent metrics store",
+			zap.String("path", cfg.FileStoragePath),
+			zap.Duration("interval", cfg.StoreInterval),
+		)
+
+		persister := storage.NewFileManager(cfg.FileStoragePath)
+		pm, persistenceStore := storage.NewPersistenceManager(
+			memStore,
+			persister,
+			cfg.StoreInterval,
+			cfg.Restore,
+			logger,
+		)
+
+		pm.StartAsyncFlush(ctx)
+
+		closeFunc = func() {
+			if err := pm.Stop(); err != nil {
+				logger.Error("failed to stop persistence manager and flush to file", zap.Error(err))
+			}
+		}
+
+		return persistenceStore, nil, closeFunc, nil
+	}
+
+	logger.Info("using in-memory storage only (no persistence)")
+	return memStore, nil, func() {}, nil
 }

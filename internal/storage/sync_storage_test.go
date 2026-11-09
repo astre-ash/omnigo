@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -30,40 +31,52 @@ type mockMemoryStorage struct {
 	getCounterErr error
 	allGauges     map[string]float64
 	allCounters   map[string]int64
+	getAllErr     error
 
 	// Snapshot.
 	snapshotRes   []domain.Metrics
 	snapshotCalls int
 }
 
-func (m *mockMemoryStorage) UpdateGauge(name string, value float64) error {
+func (m *mockMemoryStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.updateGaugeCalls++
 	m.updateGaugeName = name
 	m.updateGaugeVal = value
 	return m.updateGaugeErr
 }
 
-func (m *mockMemoryStorage) UpdateCounter(name string, value int64) error {
+func (m *mockMemoryStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.updateCounterCalls++
 	m.updateCounterName = name
 	m.updateCounterVal = value
 	return m.updateCounterErr
 }
 
-func (m *mockMemoryStorage) GetGauge(name string) (float64, error) {
+func (m *mockMemoryStorage) GetGauge(ctx context.Context, name string) (float64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	return m.getGaugeVal, m.getGaugeErr
 }
 
-func (m *mockMemoryStorage) GetCounter(name string) (int64, error) {
+func (m *mockMemoryStorage) GetCounter(ctx context.Context, name string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	return m.getCounterVal, m.getCounterErr
 }
 
-func (m *mockMemoryStorage) GetAllGauges() map[string]float64 {
-	return m.allGauges
-}
-
-func (m *mockMemoryStorage) GetAllCounters() map[string]int64 {
-	return m.allCounters
+func (m *mockMemoryStorage) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return m.allGauges, m.allCounters, m.getAllErr
 }
 
 func (m *mockMemoryStorage) Snapshot() []domain.Metrics {
@@ -94,6 +107,7 @@ func TestNewSyncStorage(t *testing.T) {
 }
 
 func TestSyncStorage_UpdateGauge(t *testing.T) {
+	ctx := context.Background()
 	errMem := errors.New("memory error")
 	errDisk := errors.New("disk write failure")
 
@@ -107,7 +121,7 @@ func TestSyncStorage_UpdateGauge(t *testing.T) {
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateGauge("Alloc", 123.45)
+		err := s.UpdateGauge(ctx, "Alloc", 123.45)
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, mem.updateGaugeCalls)
@@ -124,7 +138,7 @@ func TestSyncStorage_UpdateGauge(t *testing.T) {
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateGauge("Alloc", 100.0)
+		err := s.UpdateGauge(ctx, "Alloc", 100.0)
 		require.ErrorIs(t, err, errMem)
 
 		assert.Equal(t, 1, mem.updateGaugeCalls)
@@ -137,7 +151,7 @@ func TestSyncStorage_UpdateGauge(t *testing.T) {
 		writer := &mockSnapshotWriter{saveErr: errDisk}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateGauge("Alloc", 123.45)
+		err := s.UpdateGauge(ctx, "Alloc", 123.45)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errDisk)
 		assert.Contains(t, err.Error(), "failed to sync gauge to disk")
@@ -146,9 +160,24 @@ func TestSyncStorage_UpdateGauge(t *testing.T) {
 		assert.Equal(t, 1, mem.snapshotCalls)
 		assert.Equal(t, 1, writer.saveCalls)
 	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mem := &mockMemoryStorage{}
+		writer := &mockSnapshotWriter{}
+		s := NewSyncStorage(mem, writer)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.UpdateGauge(canceledCtx, "Alloc", 100.0)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 0, mem.updateGaugeCalls)
+		assert.Equal(t, 0, writer.saveCalls)
+	})
 }
 
 func TestSyncStorage_UpdateCounter(t *testing.T) {
+	ctx := context.Background()
 	errMem := errors.New("memory error")
 	errDisk := errors.New("disk write failure")
 
@@ -162,7 +191,7 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter("PollCount", 10)
+		err := s.UpdateCounter(ctx, "PollCount", 10)
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
@@ -179,7 +208,7 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter("PollCount", 5)
+		err := s.UpdateCounter(ctx, "PollCount", 5)
 		require.ErrorIs(t, err, errMem)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
@@ -192,7 +221,7 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 		writer := &mockSnapshotWriter{saveErr: errDisk}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter("PollCount", 10)
+		err := s.UpdateCounter(ctx, "PollCount", 10)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errDisk)
 		assert.Contains(t, err.Error(), "failed to sync counter to disk")
@@ -201,9 +230,25 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 		assert.Equal(t, 1, mem.snapshotCalls)
 		assert.Equal(t, 1, writer.saveCalls)
 	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mem := &mockMemoryStorage{}
+		writer := &mockSnapshotWriter{}
+		s := NewSyncStorage(mem, writer)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.UpdateCounter(canceledCtx, "PollCount", 5)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 0, mem.updateCounterCalls)
+		assert.Equal(t, 0, writer.saveCalls)
+	})
 }
 
 func TestSyncStorage_EmbeddedMethodsDelegation(t *testing.T) {
+	ctx := context.Background()
+
 	expectedGauges := map[string]float64{"Alloc": 42.5}
 	expectedCounters := map[string]int64{"PollCount": 7}
 
@@ -216,14 +261,16 @@ func TestSyncStorage_EmbeddedMethodsDelegation(t *testing.T) {
 	writer := &mockSnapshotWriter{}
 	s := NewSyncStorage(mem, writer)
 
-	gVal, err := s.GetGauge("Alloc")
+	gVal, err := s.GetGauge(ctx, "Alloc")
 	require.NoError(t, err)
 	assert.Equal(t, 42.5, gVal)
 
-	cVal, err := s.GetCounter("PollCount")
+	cVal, err := s.GetCounter(ctx, "PollCount")
 	require.NoError(t, err)
 	assert.Equal(t, int64(7), cVal)
 
-	assert.Equal(t, expectedGauges, s.GetAllGauges())
-	assert.Equal(t, expectedCounters, s.GetAllCounters())
+	gauges, counters, err := s.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, expectedGauges, gauges)
+	assert.Equal(t, expectedCounters, counters)
 }
