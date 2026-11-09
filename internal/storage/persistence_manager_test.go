@@ -55,9 +55,12 @@ type mockInMemStorage struct {
 	updateGaugeErr   error
 	updateCounterErr error
 	getGaugeVal      float64
+	getGaugeErr      error
 	getCounterVal    int64
+	getCounterErr    error
 	allGauges        map[string]float64
 	allCounters      map[string]int64
+	getAllErr        error
 }
 
 func (m *mockInMemStorage) Snapshot() []domain.Metrics {
@@ -74,28 +77,39 @@ func (m *mockInMemStorage) Restore(metrics []domain.Metrics) {
 	m.restoredMetrics = metrics
 }
 
-func (m *mockInMemStorage) UpdateGauge(name string, value float64) error {
+func (m *mockInMemStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.updateGaugeErr
 }
 
-func (m *mockInMemStorage) UpdateCounter(name string, value int64) error {
+func (m *mockInMemStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return m.updateCounterErr
 }
 
-func (m *mockInMemStorage) GetGauge(name string) (float64, error) {
-	return m.getGaugeVal, nil
+func (m *mockInMemStorage) GetGauge(ctx context.Context, name string) (float64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return m.getGaugeVal, m.getGaugeErr
 }
 
-func (m *mockInMemStorage) GetCounter(name string) (int64, error) {
-	return m.getCounterVal, nil
+func (m *mockInMemStorage) GetCounter(ctx context.Context, name string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	return m.getCounterVal, m.getCounterErr
 }
 
-func (m *mockInMemStorage) GetAllGauges() map[string]float64 {
-	return m.allGauges
-}
-
-func (m *mockInMemStorage) GetAllCounters() map[string]int64 {
-	return m.allCounters
+func (m *mockInMemStorage) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return m.allGauges, m.allCounters, m.getAllErr
 }
 
 func TestNewPersistenceManager_Restore(t *testing.T) {

@@ -22,17 +22,23 @@ type MetricHandler interface {
 	UpdateJSON(w http.ResponseWriter, r *http.Request)
 }
 
+type DBHandler interface {
+	Ping(w http.ResponseWriter, r *http.Request)
+}
+
 type Server struct {
 	addr       string
 	httpServer *http.Server
-	handler    MetricHandler
+	metricH    MetricHandler
+	dbH        DBHandler
 	logger     *zap.Logger
 }
 
-func NewServer(addr string, h MetricHandler, l *zap.Logger) *Server {
+func NewServer(addr string, mh MetricHandler, dbh DBHandler, l *zap.Logger) *Server {
 	s := &Server{
 		addr:    addr,
-		handler: h,
+		metricH: mh,
+		dbH:     dbh,
 		logger:  l,
 	}
 
@@ -55,16 +61,20 @@ func (s *Server) setupRoutes() http.Handler {
 	r.Use(appMiddleware.Compress())
 	r.Use(chiMiddleware.Recoverer)
 
-	r.Get("/", s.handler.GetAll)
+	if s.dbH != nil {
+		r.Get("/ping", s.dbH.Ping)
+	}
+
+	r.Get("/", s.metricH.GetAll)
 
 	r.Route("/update", func(r chi.Router) {
-		r.Post("/{type}/{name}/{value}", s.handler.Update)
-		r.Post("/", s.handler.UpdateJSON)
+		r.Post("/{type}/{name}/{value}", s.metricH.Update)
+		r.Post("/", s.metricH.UpdateJSON)
 	})
 
 	r.Route("/value", func(r chi.Router) {
-		r.Post("/", s.handler.GetValueJSON)
-		r.Get("/{type}/{name}", s.handler.GetValue)
+		r.Post("/", s.metricH.GetValueJSON)
+		r.Get("/{type}/{name}", s.metricH.GetValue)
 	})
 
 	return r
