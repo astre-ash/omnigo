@@ -12,18 +12,25 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
+var _ Storage = (*mockStorage)(nil)
+
 type mockStorage struct {
-	// Spy. Stub fields for UpdateGauge.
+	// Spy / Stub fields for UpdateGauge.
 	gaugeName      string
 	gaugeVal       float64
 	gaugeCalled    bool
 	updateGaugeErr error
 
-	// Spy. Stub fields for UpdateCounter.
+	// Spy / Stub fields for UpdateCounter.
 	counterName      string
 	counterVal       int64
 	counterCalled    bool
 	updateCounterErr error
+
+	// Spy / Stub fields for UpdateBatch.
+	batchMetrics   []domain.Metrics
+	batchCalled    bool
+	updateBatchErr error
 
 	// Stub fields for GetGauge.
 	getGaugeVal float64
@@ -57,6 +64,15 @@ func (m *mockStorage) UpdateCounter(ctx context.Context, name string, value int6
 	m.counterVal = value
 	m.counterCalled = true
 	return m.updateCounterErr
+}
+
+func (m *mockStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.batchMetrics = metrics
+	m.batchCalled = true
+	return m.updateBatchErr
 }
 
 func (m *mockStorage) GetGauge(ctx context.Context, name string) (float64, error) {
@@ -541,6 +557,83 @@ func TestMetricService_GetAll(t *testing.T) {
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.Nil(t, gauges)
 		assert.Nil(t, counters)
+	})
+}
+
+func TestMetricService_UpdateMetrics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success: empty batch returns immediately without calling storage", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		err := svc.UpdateMetrics(ctx, []domain.Metrics{})
+		require.NoError(t, err)
+		assert.False(t, mock.batchCalled)
+	})
+
+	t.Run("success: valid batch delegates to storage.UpdateBatch", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+			{ID: "poll", MType: domain.TypeCounter, Delta: int64Ptr(1)},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.NoError(t, err)
+
+		assert.True(t, mock.batchCalled)
+		assert.Equal(t, metrics, mock.batchMetrics)
+	})
+
+	t.Run("failure: invalid metric in batch halts execution and returns error", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+			{ID: "invalid_metric", MType: "unknown_type"},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "metric ID 'invalid_metric'")
+		assert.False(t, mock.batchCalled, "storage.UpdateBatch must not be called when validation fails")
+	})
+
+	t.Run("failure: storage update batch error is wrapped", func(t *testing.T) {
+		errStorage := errors.New("batch insert conflict")
+		mock := &mockStorage{
+			updateBatchErr: errStorage,
+		}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errStorage)
+		assert.Contains(t, err.Error(), "failed to update metrics batch")
+		assert.True(t, mock.batchCalled)
+	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+		}
+
+		err := svc.UpdateMetrics(canceledCtx, metrics)
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 

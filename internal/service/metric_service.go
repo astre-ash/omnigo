@@ -16,6 +16,7 @@ type Storage interface {
 	GetCounter(ctx context.Context, name string) (int64, error)
 
 	GetAll(ctx context.Context) (map[string]float64, map[string]int64, error)
+	UpdateBatch(ctx context.Context, metrics []domain.Metrics) error
 }
 
 type MetricService struct {
@@ -127,4 +128,22 @@ func (s *MetricService) Get(ctx context.Context, metricType, name string) (strin
 func (s *MetricService) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
 	return s.storage.GetAll(ctx)
 
+}
+
+func (s *MetricService) UpdateMetrics(ctx context.Context, metrics []domain.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	for _, m := range metrics {
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("%w: metric ID '%s'", err, m.ID)
+		}
+	}
+
+	if err := s.storage.UpdateBatch(ctx, metrics); err != nil {
+		return fmt.Errorf("failed to update metrics batch: %w", err)
+	}
+
+	return nil
 }

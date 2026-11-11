@@ -20,6 +20,7 @@ type MetricHandler interface {
 	GetAll(w http.ResponseWriter, r *http.Request)
 	GetValueJSON(w http.ResponseWriter, r *http.Request)
 	UpdateJSON(w http.ResponseWriter, r *http.Request)
+	UpdatesJSON(w http.ResponseWriter, r *http.Request)
 }
 
 type DBHandler interface {
@@ -71,6 +72,9 @@ func (s *Server) setupRoutes() http.Handler {
 		r.Post("/{type}/{name}/{value}", s.metricH.Update)
 		r.Post("/", s.metricH.UpdateJSON)
 	})
+
+	r.Post("/updates/", s.metricH.UpdatesJSON)
+	r.Post("/updates", s.metricH.UpdatesJSON)
 
 	r.Route("/value", func(r chi.Router) {
 		r.Post("/", s.metricH.GetValueJSON)

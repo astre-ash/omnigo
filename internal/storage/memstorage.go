@@ -93,7 +93,34 @@ func (s *MemStorage) GetAll(ctx context.Context) (map[string]float64, map[string
 	return gauges, counters, nil
 }
 
-func (s *MemStorage) Snapshot() []domain.Metrics {
+func (s *MemStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	s.mtx.Lock()
+	defer s.mtx.Unlock()
+
+	for _, m := range metrics {
+		switch m.MType {
+		case domain.TypeGauge:
+			if m.Value != nil {
+				s.gauges[m.ID] = *m.Value
+			}
+		case domain.TypeCounter:
+			if m.Delta != nil {
+				s.counters[m.ID] += *m.Delta
+			}
+		}
+	}
+	return nil
+}
+
+func (s *MemStorage) Snapshot(ctx context.Context) ([]domain.Metrics, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -114,10 +141,14 @@ func (s *MemStorage) Snapshot() []domain.Metrics {
 			Delta: &d,
 		})
 	}
-	return metrics
+	return metrics, nil
 }
 
-func (s *MemStorage) Restore(metrics []domain.Metrics) {
+func (s *MemStorage) Restore(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -133,4 +164,5 @@ func (s *MemStorage) Restore(metrics []domain.Metrics) {
 			}
 		}
 	}
+	return nil
 }

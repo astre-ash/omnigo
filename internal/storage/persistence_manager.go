@@ -18,8 +18,8 @@ type Persister interface {
 
 type InMemStorage interface {
 	service.Storage
-	Snapshot() []domain.Metrics
-	Restore(metrics []domain.Metrics)
+	Snapshot(ctx context.Context) ([]domain.Metrics, error)
+	Restore(ctx context.Context, metrics []domain.Metrics) error
 }
 
 type PersistenceManager struct {
@@ -34,12 +34,16 @@ type PersistenceManager struct {
 }
 
 func NewPersistenceManager(
+	ctx context.Context,
 	mem InMemStorage,
 	persister Persister,
 	storeInterval time.Duration,
 	restore bool,
 	logger *zap.Logger,
-) (*PersistenceManager, service.Storage) {
+) (*PersistenceManager, service.Storage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 
 	pm := &PersistenceManager{
 		memStore:      mem,
@@ -51,9 +55,11 @@ func NewPersistenceManager(
 	if restore && persister != nil {
 		metrics, err := persister.Load()
 		if err != nil {
-			logger.Warn("failed to restore metrics from storage", zap.Error(err))
+			logger.Warn("failed to load metrics from file", zap.Error(err))
 		} else if len(metrics) > 0 {
-			mem.Restore(metrics)
+			if err := mem.Restore(ctx, metrics); err != nil {
+				return nil, nil, fmt.Errorf("failed to restore metrics to memory: %w", err)
+			}
 			logger.Info("metrics restored successfully", zap.Int("count", len(metrics)))
 		}
 	}
@@ -63,7 +69,7 @@ func NewPersistenceManager(
 		activeStorage = NewSyncStorage(mem, persister)
 	}
 
-	return pm, activeStorage
+	return pm, activeStorage, nil
 }
 
 func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
@@ -84,7 +90,7 @@ func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
-				if err := pm.Flush(); err != nil {
+				if err := pm.Flush(flushCtx); err != nil {
 					pm.logger.Error("failed to periodically dump metrics", zap.Error(err))
 				}
 			case <-flushCtx.Done():
@@ -94,17 +100,16 @@ func (pm *PersistenceManager) StartAsyncFlush(ctx context.Context) {
 	}()
 }
 
-func (pm *PersistenceManager) Stop() error {
+func (pm *PersistenceManager) Stop(ctx context.Context) error {
 	if pm.cancel != nil {
 		pm.cancel()
 	}
 
 	pm.wg.Wait()
-
-	return pm.Flush()
+	return pm.Flush(ctx)
 }
 
-func (pm *PersistenceManager) Flush() error {
+func (pm *PersistenceManager) Flush(ctx context.Context) error {
 	if pm.persister == nil {
 		return nil
 	}
@@ -112,8 +117,13 @@ func (pm *PersistenceManager) Flush() error {
 	pm.mtx.Lock()
 	defer pm.mtx.Unlock()
 
-	if err := pm.persister.Save(pm.memStore.Snapshot()); err != nil {
-		return fmt.Errorf("failed to flush snapshot: %w", err)
+	snapshot, err := pm.memStore.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get snapshot: %w", err)
+	}
+
+	if err := pm.persister.Save(snapshot); err != nil {
+		return fmt.Errorf("failed to save snapshot: %w", err)
 	}
 	return nil
 }

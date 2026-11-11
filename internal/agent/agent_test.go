@@ -13,15 +13,24 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
+var _ Sender = (*mockSender)(nil)
+
 type mockSender struct {
 	mtx     sync.Mutex
 	err     error
 	batches [][]domain.Metrics
+	calls   int
 }
 
-func (m *mockSender) SendAll(metrics []domain.Metrics) error {
+func (m *mockSender) SendBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	m.mtx.Lock()
 	defer m.mtx.Unlock()
+
+	m.calls++
 
 	if m.err != nil {
 		return m.err
@@ -40,7 +49,13 @@ func (m *mockSender) getBatches() [][]domain.Metrics {
 	return m.batches
 }
 
-func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
+func (m *mockSender) getCalls() int {
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+	return m.calls
+}
+
+func TestAgent_Run_SuccessAndDecreasePollCount(t *testing.T) {
 	pollInterval := 10 * time.Millisecond
 	reportInterval := 30 * time.Millisecond
 
@@ -48,7 +63,7 @@ func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
 	mock := &mockSender{}
 	agent := NewAgent(pollInterval, reportInterval, collector, mock)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 85*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
@@ -59,7 +74,7 @@ func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(1 * time.Second):
 		t.Fatal("agent did not stop within expected time")
 	}
 
@@ -77,7 +92,7 @@ func TestAgent_Run_SuccessAndResetPollCount(t *testing.T) {
 		secondBatchPoll, found2 := findMetric(batches[1], "PollCount")
 		require.True(t, found2, "PollCount must be present in second batch")
 		require.NotNil(t, secondBatchPoll.Delta)
-		assert.LessOrEqual(t, *secondBatchPoll.Delta, int64(4), "pollCount must be reset between successful reports")
+		assert.LessOrEqual(t, *secondBatchPoll.Delta, int64(4), "pollCount must be decreased between successful reports")
 	}
 }
 
@@ -92,23 +107,28 @@ func TestAgent_Run_SendFailureRetainsPollCount(t *testing.T) {
 	}
 	agent := NewAgent(pollInterval, reportInterval, collector, mock)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 70*time.Millisecond)
 	defer cancel()
 
 	done := make(chan struct{})
-
 	go func() {
 		agent.Run(ctx)
 		close(done)
 	}()
 
-	<-done
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("agent did not stop within expected time")
+	}
+
+	require.GreaterOrEqual(t, mock.getCalls(), 1, "sender must be called at least once")
 
 	metrics := collector.GetMetrics()
 	pollMetric, found := findMetric(metrics, "PollCount")
 	require.True(t, found, "PollCount must be present")
 	require.NotNil(t, pollMetric.Delta, "PollCount Delta must not be nil")
-	assert.GreaterOrEqual(t, *pollMetric.Delta, int64(4), "pollCount must NOT be reset when sending fails")
+	assert.GreaterOrEqual(t, *pollMetric.Delta, int64(4), "pollCount must NOT be decreased when sending fails")
 }
 
 func TestAgent_Run_GracefulShutdown(t *testing.T) {

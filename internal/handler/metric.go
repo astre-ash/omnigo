@@ -20,6 +20,8 @@ type MetricService interface {
 
 	GetMetric(ctx context.Context, m domain.Metrics) (domain.Metrics, error)
 	UpdateMetric(ctx context.Context, m domain.Metrics) (domain.Metrics, error)
+
+	UpdateMetrics(ctx context.Context, metrics []domain.Metrics) error
 }
 
 type MetricHandler struct {
@@ -137,6 +139,27 @@ func (h *MetricHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = buf.WriteTo(w)
+}
+
+func (h *MetricHandler) UpdatesJSON(w http.ResponseWriter, r *http.Request) {
+	var req []domain.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Warn("cannot decode batch request JSON", zap.Error(err))
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if len(req) == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if err := h.service.UpdateMetrics(r.Context(), req); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h *MetricHandler) handleError(w http.ResponseWriter, err error) {

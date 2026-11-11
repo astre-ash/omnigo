@@ -76,7 +76,7 @@ func (s *Storage) UpdateCounter(ctx context.Context, name string, delta int64) e
 		INSERT INTO metrics (id, type, delta)
 		VALUES (@id, @type, @delta)
 		ON CONFLICT (id, type) 
-		DO UPDATE SET delta = metrics.delta + EXCLUDED.delta;
+		DO UPDATE SET delta = COALESCE(metrics.delta, 0) + EXCLUDED.delta;
 	`
 	_, err := s.pool.Exec(ctx, query, pgx.NamedArgs{
 		"id":    name,
@@ -176,4 +176,72 @@ func (s *Storage) GetAll(ctx context.Context) (map[string]float64, map[string]in
 	}
 
 	return gauges, counters, nil
+}
+
+func (s *Storage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	batch := &pgx.Batch{}
+
+	const gaugeQuery = `
+		INSERT INTO metrics (id, type, value)
+		VALUES (@id, @type, @value)
+		ON CONFLICT (id, type) 
+		DO UPDATE SET value = EXCLUDED.value;
+	`
+	const counterQuery = `
+		INSERT INTO metrics (id, type, delta)
+		VALUES (@id, @type, @delta)
+		ON CONFLICT (id, type) 
+		DO UPDATE SET delta = metrics.delta + EXCLUDED.delta;
+	`
+
+	var addedCount int
+	for _, m := range metrics {
+		switch m.MType {
+		case domain.TypeGauge:
+			batch.Queue(gaugeQuery, pgx.NamedArgs{
+				"id":    m.ID,
+				"type":  m.MType,
+				"value": *m.Value,
+			})
+			addedCount++
+		case domain.TypeCounter:
+			batch.Queue(counterQuery, pgx.NamedArgs{
+				"id":    m.ID,
+				"type":  m.MType,
+				"delta": *m.Delta,
+			})
+			addedCount++
+		}
+	}
+
+	br := tx.SendBatch(ctx, batch)
+
+	for i := 0; i < addedCount; i++ {
+		if _, err := br.Exec(); err != nil {
+			_ = br.Close()
+			return fmt.Errorf("failed to execute batch statement: %w", err)
+		}
+	}
+
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("failed to close batch results: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }

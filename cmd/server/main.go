@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/astre-ash/omnigo/internal/config"
 	"github.com/astre-ash/omnigo/internal/handler"
@@ -79,18 +80,25 @@ func initStorage(
 		)
 
 		persister := storage.NewFileManager(cfg.FileStoragePath)
-		pm, persistenceStore := storage.NewPersistenceManager(
+		pm, persistenceStore, err := storage.NewPersistenceManager(
+			ctx,
 			memStore,
 			persister,
 			cfg.StoreInterval,
 			cfg.Restore,
 			logger,
 		)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to init persistence manager: %w", err)
+		}
 
 		pm.StartAsyncFlush(ctx)
 
 		closeFunc = func() {
-			if err := pm.Stop(); err != nil {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			if err := pm.Stop(shutdownCtx); err != nil {
 				logger.Error("failed to stop persistence manager and flush to file", zap.Error(err))
 			}
 		}
