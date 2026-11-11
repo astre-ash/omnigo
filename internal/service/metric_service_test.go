@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"math"
 	"testing"
@@ -11,18 +12,25 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
+var _ Storage = (*mockStorage)(nil)
+
 type mockStorage struct {
-	// Spy. Stub fields for UpdateGauge.
+	// Spy / Stub fields for UpdateGauge.
 	gaugeName      string
 	gaugeVal       float64
 	gaugeCalled    bool
 	updateGaugeErr error
 
-	// Spy. Stub fields for UpdateCounter.
+	// Spy / Stub fields for UpdateCounter.
 	counterName      string
 	counterVal       int64
 	counterCalled    bool
 	updateCounterErr error
+
+	// Spy / Stub fields for UpdateBatch.
+	batchMetrics   []domain.Metrics
+	batchCalled    bool
+	updateBatchErr error
 
 	// Stub fields for GetGauge.
 	getGaugeVal float64
@@ -35,39 +43,61 @@ type mockStorage struct {
 	// Stub fields for GetAll.
 	allGauges   map[string]float64
 	allCounters map[string]int64
+	getAllErr   error
 }
 
-func (m *mockStorage) UpdateGauge(name string, value float64) error {
+func (m *mockStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.gaugeName = name
 	m.gaugeVal = value
 	m.gaugeCalled = true
 	return m.updateGaugeErr
 }
 
-func (m *mockStorage) UpdateCounter(name string, value int64) error {
+func (m *mockStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.counterName = name
 	m.counterVal = value
 	m.counterCalled = true
 	return m.updateCounterErr
 }
 
-func (m *mockStorage) GetGauge(name string) (float64, error) {
+func (m *mockStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.batchMetrics = metrics
+	m.batchCalled = true
+	return m.updateBatchErr
+}
+
+func (m *mockStorage) GetGauge(ctx context.Context, name string) (float64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	return m.getGaugeVal, m.getGaugeErr
 }
 
-func (m *mockStorage) GetCounter(name string) (int64, error) {
+func (m *mockStorage) GetCounter(ctx context.Context, name string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	return m.getCounterVal, m.getCounterErr
 }
 
-func (m *mockStorage) GetAllGauges() map[string]float64 {
-	return m.allGauges
-}
-
-func (m *mockStorage) GetAllCounters() map[string]int64 {
-	return m.allCounters
+func (m *mockStorage) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return m.allGauges, m.allCounters, m.getAllErr
 }
 
 func TestMetricService_UpdateMetric(t *testing.T) {
+	ctx := context.Background()
 	errStorage := errors.New("storage update failed")
 
 	t.Run("success: gauge metric updated", func(t *testing.T) {
@@ -80,7 +110,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 			Value: float64Ptr(123.45),
 		}
 
-		res, err := svc.UpdateMetric(req)
+		res, err := svc.UpdateMetric(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, req.ID, res.ID)
 		assert.Equal(t, req.MType, res.MType)
@@ -104,7 +134,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 			Delta: int64Ptr(5),
 		}
 
-		res, err := svc.UpdateMetric(req)
+		res, err := svc.UpdateMetric(ctx, req)
 		require.NoError(t, err)
 		assert.Equal(t, req.ID, res.ID)
 		assert.Equal(t, req.MType, res.MType)
@@ -133,7 +163,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 				mock := &mockStorage{}
 				svc := NewMetricService(mock)
 
-				_, err := svc.UpdateMetric(domain.Metrics{
+				_, err := svc.UpdateMetric(ctx, domain.Metrics{
 					ID:    "alloc",
 					MType: domain.TypeGauge,
 					Value: tc.value,
@@ -149,7 +179,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 		mock := &mockStorage{}
 		svc := NewMetricService(mock)
 
-		_, err := svc.UpdateMetric(domain.Metrics{
+		_, err := svc.UpdateMetric(ctx, domain.Metrics{
 			ID:    "pollCount",
 			MType: domain.TypeCounter,
 			Delta: nil,
@@ -163,7 +193,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 		mock := &mockStorage{}
 		svc := NewMetricService(mock)
 
-		_, err := svc.UpdateMetric(domain.Metrics{
+		_, err := svc.UpdateMetric(ctx, domain.Metrics{
 			ID:    "temp",
 			MType: "histogram",
 		})
@@ -175,7 +205,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 		mock := &mockStorage{updateGaugeErr: errStorage}
 		svc := NewMetricService(mock)
 
-		_, err := svc.UpdateMetric(domain.Metrics{
+		_, err := svc.UpdateMetric(ctx, domain.Metrics{
 			ID:    "alloc",
 			MType: domain.TypeGauge,
 			Value: float64Ptr(10.0),
@@ -188,7 +218,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 		mock := &mockStorage{getCounterErr: errors.New("read error")}
 		svc := NewMetricService(mock)
 
-		_, err := svc.UpdateMetric(domain.Metrics{
+		_, err := svc.UpdateMetric(ctx, domain.Metrics{
 			ID:    "pollCount",
 			MType: domain.TypeCounter,
 			Delta: int64Ptr(5),
@@ -197,16 +227,33 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "read error")
 	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := svc.UpdateMetric(canceledCtx, domain.Metrics{
+			ID:    "alloc",
+			MType: domain.TypeGauge,
+			Value: float64Ptr(10.0),
+		})
+
+		assert.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 func TestMetricService_GetMetric(t *testing.T) {
+	ctx := context.Background()
 	errStorageFailure := errors.New("storage read failed")
 
 	t.Run("success: gauge metric found and filled", func(t *testing.T) {
 		mock := &mockStorage{getGaugeVal: 123.456}
 		svc := NewMetricService(mock)
 
-		res, err := svc.GetMetric(domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
+		res, err := svc.GetMetric(ctx, domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
 		require.NoError(t, err)
 		assert.Equal(t, "alloc", res.ID)
 		assert.Equal(t, domain.TypeGauge, res.MType)
@@ -218,7 +265,7 @@ func TestMetricService_GetMetric(t *testing.T) {
 		mock := &mockStorage{getCounterVal: 42}
 		svc := NewMetricService(mock)
 
-		res, err := svc.GetMetric(domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
+		res, err := svc.GetMetric(ctx, domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
 		require.NoError(t, err)
 		assert.Equal(t, "pollCount", res.ID)
 		assert.Equal(t, domain.TypeCounter, res.MType)
@@ -230,7 +277,7 @@ func TestMetricService_GetMetric(t *testing.T) {
 		mock := &mockStorage{getGaugeErr: errStorageFailure}
 		svc := NewMetricService(mock)
 
-		_, err := svc.GetMetric(domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
+		_, err := svc.GetMetric(ctx, domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
 		assert.ErrorIs(t, err, errStorageFailure)
 	})
 
@@ -238,7 +285,7 @@ func TestMetricService_GetMetric(t *testing.T) {
 		mock := &mockStorage{getCounterErr: errStorageFailure}
 		svc := NewMetricService(mock)
 
-		_, err := svc.GetMetric(domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
+		_, err := svc.GetMetric(ctx, domain.Metrics{ID: "pollCount", MType: domain.TypeCounter})
 		assert.ErrorIs(t, err, errStorageFailure)
 	})
 
@@ -246,12 +293,25 @@ func TestMetricService_GetMetric(t *testing.T) {
 		mock := &mockStorage{}
 		svc := NewMetricService(mock)
 
-		_, err := svc.GetMetric(domain.Metrics{ID: "test", MType: "unknown"})
+		_, err := svc.GetMetric(ctx, domain.Metrics{ID: "test", MType: "unknown"})
 		assert.ErrorIs(t, err, domain.ErrUnknownMetricType)
+	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		_, err := svc.GetMetric(canceledCtx, domain.Metrics{ID: "alloc", MType: domain.TypeGauge})
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 
 func TestMetricService_Update(t *testing.T) {
+	ctx := context.Background()
+
 	tests := []struct {
 		name         string
 		metricType   string
@@ -353,7 +413,7 @@ func TestMetricService_Update(t *testing.T) {
 			mock := &mockStorage{}
 			svc := NewMetricService(mock)
 
-			err := svc.Update(tt.metricType, tt.metricName, tt.metricValue)
+			err := svc.Update(ctx, tt.metricType, tt.metricName, tt.metricValue)
 
 			if tt.expectedErr != nil {
 				assert.ErrorIs(t, err, tt.expectedErr, "returned error does not match expected sentinel error")
@@ -370,6 +430,7 @@ func TestMetricService_Update(t *testing.T) {
 }
 
 func TestMetricService_Get(t *testing.T) {
+	ctx := context.Background()
 	errStorageFailure := errors.New("storage read failed")
 
 	tests := []struct {
@@ -438,7 +499,7 @@ func TestMetricService_Get(t *testing.T) {
 			tt.setupMock(mock)
 
 			svc := NewMetricService(mock)
-			val, err := svc.Get(tt.metricType, tt.metricName)
+			val, err := svc.Get(ctx, tt.metricType, tt.metricName)
 
 			if tt.expectedErr != nil {
 				assert.ErrorIs(t, err, tt.expectedErr, "expected matching error")
@@ -452,19 +513,128 @@ func TestMetricService_Get(t *testing.T) {
 }
 
 func TestMetricService_GetAll(t *testing.T) {
-	expectedGauges := map[string]float64{"alloc": 10.5, "free": 20.0}
-	expectedCounters := map[string]int64{"poll": 5}
+	ctx := context.Background()
 
-	mock := &mockStorage{
-		allGauges:   expectedGauges,
-		allCounters: expectedCounters,
-	}
+	t.Run("success: returns all metrics", func(t *testing.T) {
+		expectedGauges := map[string]float64{"alloc": 10.5, "free": 20.0}
+		expectedCounters := map[string]int64{"poll": 5}
 
-	svc := NewMetricService(mock)
-	gauges, counters := svc.GetAll()
+		mock := &mockStorage{
+			allGauges:   expectedGauges,
+			allCounters: expectedCounters,
+		}
 
-	assert.Equal(t, expectedGauges, gauges, "gauges map mismatch")
-	assert.Equal(t, expectedCounters, counters, "counters map mismatch")
+		svc := NewMetricService(mock)
+		gauges, counters, err := svc.GetAll(ctx)
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedGauges, gauges, "gauges map mismatch")
+		assert.Equal(t, expectedCounters, counters, "counters map mismatch")
+	})
+
+	t.Run("failure: storage returns error", func(t *testing.T) {
+		errStorage := errors.New("db error")
+		mock := &mockStorage{
+			getAllErr: errStorage,
+		}
+
+		svc := NewMetricService(mock)
+		gauges, counters, err := svc.GetAll(ctx)
+
+		assert.ErrorIs(t, err, errStorage)
+		assert.Nil(t, gauges)
+		assert.Nil(t, counters)
+	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		gauges, counters, err := svc.GetAll(canceledCtx)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, gauges)
+		assert.Nil(t, counters)
+	})
+}
+
+func TestMetricService_UpdateMetrics(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success: empty batch returns immediately without calling storage", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		err := svc.UpdateMetrics(ctx, []domain.Metrics{})
+		require.NoError(t, err)
+		assert.False(t, mock.batchCalled)
+	})
+
+	t.Run("success: valid batch delegates to storage.UpdateBatch", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+			{ID: "poll", MType: domain.TypeCounter, Delta: int64Ptr(1)},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.NoError(t, err)
+
+		assert.True(t, mock.batchCalled)
+		assert.Equal(t, metrics, mock.batchMetrics)
+	})
+
+	t.Run("failure: invalid metric in batch halts execution and returns error", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+			{ID: "invalid_metric", MType: "unknown_type"},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "metric ID 'invalid_metric'")
+		assert.False(t, mock.batchCalled, "storage.UpdateBatch must not be called when validation fails")
+	})
+
+	t.Run("failure: storage update batch error is wrapped", func(t *testing.T) {
+		errStorage := errors.New("batch insert conflict")
+		mock := &mockStorage{
+			updateBatchErr: errStorage,
+		}
+		svc := NewMetricService(mock)
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+		}
+
+		err := svc.UpdateMetrics(ctx, metrics)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errStorage)
+		assert.Contains(t, err.Error(), "failed to update metrics batch")
+		assert.True(t, mock.batchCalled)
+	})
+
+	t.Run("failure: context canceled", func(t *testing.T) {
+		mock := &mockStorage{}
+		svc := NewMetricService(mock)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		metrics := []domain.Metrics{
+			{ID: "alloc", MType: domain.TypeGauge, Value: float64Ptr(12.34)},
+		}
+
+		err := svc.UpdateMetrics(canceledCtx, metrics)
+		assert.ErrorIs(t, err, context.Canceled)
+	})
 }
 
 func float64Ptr(v float64) *float64 {

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"sync"
 
 	"github.com/astre-ash/omnigo/internal/domain"
@@ -17,26 +18,38 @@ func NewMemStorage() *MemStorage {
 		gauges:   make(map[string]float64),
 		counters: make(map[string]int64),
 	}
-
 }
 
-func (s *MemStorage) UpdateGauge(name string, value float64) error {
+func (s *MemStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.gauges[name] = value
 	return nil
 }
 
-func (s *MemStorage) UpdateCounter(name string, value int64) error {
+func (s *MemStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.counters[name] += value
 	return nil
 }
 
-func (s *MemStorage) GetGauge(name string) (float64, error) {
+func (s *MemStorage) GetGauge(ctx context.Context, name string) (float64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+
 	val, ok := s.gauges[name]
 	if !ok {
 		return 0, domain.ErrMetricNotFound
@@ -44,9 +57,14 @@ func (s *MemStorage) GetGauge(name string) (float64, error) {
 	return val, nil
 }
 
-func (s *MemStorage) GetCounter(name string) (int64, error) {
+func (s *MemStorage) GetCounter(ctx context.Context, name string) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
+
 	val, ok := s.counters[name]
 	if !ok {
 		return 0, domain.ErrMetricNotFound
@@ -54,29 +72,55 @@ func (s *MemStorage) GetCounter(name string) (int64, error) {
 	return val, nil
 }
 
-func (s *MemStorage) GetAllGauges() map[string]float64 {
+func (s *MemStorage) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	copyMap := make(map[string]float64, len(s.gauges))
+	gauges := make(map[string]float64, len(s.gauges))
 	for k, v := range s.gauges {
-		copyMap[k] = v
+		gauges[k] = v
 	}
-	return copyMap
+
+	counters := make(map[string]int64, len(s.counters))
+	for k, v := range s.counters {
+		counters[k] = v
+	}
+
+	return gauges, counters, nil
 }
 
-func (s *MemStorage) GetAllCounters() map[string]int64 {
+func (s *MemStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
-	copyMap := make(map[string]int64, len(s.counters))
-	for k, v := range s.counters {
-		copyMap[k] = v
+	for _, m := range metrics {
+		switch m.MType {
+		case domain.TypeGauge:
+			if m.Value != nil {
+				s.gauges[m.ID] = *m.Value
+			}
+		case domain.TypeCounter:
+			if m.Delta != nil {
+				s.counters[m.ID] += *m.Delta
+			}
+		}
 	}
-	return copyMap
+	return nil
 }
 
-func (s *MemStorage) Snapshot() []domain.Metrics {
+func (s *MemStorage) Snapshot(ctx context.Context) ([]domain.Metrics, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -85,7 +129,7 @@ func (s *MemStorage) Snapshot() []domain.Metrics {
 		v := val
 		metrics = append(metrics, domain.Metrics{
 			ID:    name,
-			MType: "gauge",
+			MType: domain.TypeGauge,
 			Value: &v,
 		})
 	}
@@ -93,14 +137,18 @@ func (s *MemStorage) Snapshot() []domain.Metrics {
 		d := delta
 		metrics = append(metrics, domain.Metrics{
 			ID:    name,
-			MType: "counter",
+			MType: domain.TypeCounter,
 			Delta: &d,
 		})
 	}
-	return metrics
+	return metrics, nil
 }
 
-func (s *MemStorage) Restore(metrics []domain.Metrics) {
+func (s *MemStorage) Restore(ctx context.Context, metrics []domain.Metrics) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 
@@ -116,4 +164,5 @@ func (s *MemStorage) Restore(metrics []domain.Metrics) {
 			}
 		}
 	}
+	return nil
 }

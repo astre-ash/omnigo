@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"html/template"
@@ -13,12 +14,14 @@ import (
 )
 
 type MetricService interface {
-	Update(metricType, name, valueStr string) error
-	Get(metricType, name string) (string, error)
-	GetAll() (map[string]float64, map[string]int64)
+	Update(ctx context.Context, metricType, name, valueStr string) error
+	Get(ctx context.Context, metricType, name string) (string, error)
+	GetAll(ctx context.Context) (map[string]float64, map[string]int64, error)
 
-	GetMetric(m domain.Metrics) (domain.Metrics, error)
-	UpdateMetric(m domain.Metrics) (domain.Metrics, error)
+	GetMetric(ctx context.Context, m domain.Metrics) (domain.Metrics, error)
+	UpdateMetric(ctx context.Context, m domain.Metrics) (domain.Metrics, error)
+
+	UpdateMetrics(ctx context.Context, metrics []domain.Metrics) error
 }
 
 type MetricHandler struct {
@@ -48,7 +51,7 @@ func (h *MetricHandler) GetValueJSON(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "metric name is empty", http.StatusNotFound)
 		return
 	}
-	res, err := h.service.GetMetric(req)
+	res, err := h.service.GetMetric(r.Context(), req)
 	if err != nil {
 		h.handleError(w, err)
 		return
@@ -71,7 +74,7 @@ func (h *MetricHandler) UpdateJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.service.UpdateMetric(req)
+	res, err := h.service.UpdateMetric(r.Context(), req)
 	if err != nil {
 
 		h.handleError(w, err)
@@ -86,7 +89,7 @@ func (h *MetricHandler) Update(w http.ResponseWriter, r *http.Request) {
 	metricName := chi.URLParam(r, "name")
 	metricValueStr := chi.URLParam(r, "value")
 
-	err := h.service.Update(metricType, metricName, metricValueStr)
+	err := h.service.Update(r.Context(), metricType, metricName, metricValueStr)
 	if err != nil {
 		h.handleError(w, err)
 		return
@@ -99,7 +102,7 @@ func (h *MetricHandler) GetValue(w http.ResponseWriter, r *http.Request) {
 	metricType := chi.URLParam(r, "type")
 	metricName := chi.URLParam(r, "name")
 
-	respVal, err := h.service.Get(metricType, metricName)
+	respVal, err := h.service.Get(r.Context(), metricType, metricName)
 	if err != nil {
 		h.handleError(w, err)
 		return
@@ -111,7 +114,12 @@ func (h *MetricHandler) GetValue(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MetricHandler) GetAll(w http.ResponseWriter, r *http.Request) {
-	gauges, counters := h.service.GetAll()
+	gauges, counters, err := h.service.GetAll(r.Context())
+	if err != nil {
+		h.logger.Error("failed to get all metrics", zap.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
 	data := struct {
 		Gauges   map[string]float64
@@ -131,6 +139,27 @@ func (h *MetricHandler) GetAll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = buf.WriteTo(w)
+}
+
+func (h *MetricHandler) UpdatesJSON(w http.ResponseWriter, r *http.Request) {
+	var req []domain.Metrics
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Warn("cannot decode batch request JSON", zap.Error(err))
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	if len(req) == 0 {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if err := h.service.UpdateMetrics(r.Context(), req); err != nil {
+		h.handleError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h *MetricHandler) handleError(w http.ResponseWriter, err error) {

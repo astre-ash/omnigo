@@ -32,12 +32,23 @@ func gzipDecompress(t *testing.T, data []byte) []byte {
 	return decompressed
 }
 
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (t *trackingReadCloser) Close() error {
+	t.closed = true
+	return nil
+}
+
 func TestCompressMiddleware(t *testing.T) {
 	t.Run("decompresses inbound request body with gzip", func(t *testing.T) {
 		expectedBody := `{"id":"alloc","type":"gauge","value":42.5}`
 		compressedBody := gzipCompress(t, []byte(expectedBody))
 
 		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
 			body, err := io.ReadAll(r.Body)
 			assert.NoError(t, err)
 			assert.Equal(t, expectedBody, string(body))
@@ -53,11 +64,44 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
+	t.Run("returns 400 Bad Request when request body has invalid gzip and Content-Encoding gzip", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte("not a valid gzip payload")))
+		req.Header.Set("Content-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "failed to decode gzip body")
+	})
+
+	t.Run("gzipReadCloser closes both gzip reader and original body", func(t *testing.T) {
+		compressedBody := gzipCompress(t, []byte("payload"))
+		origBody := &trackingReadCloser{Reader: bytes.NewReader(compressedBody)}
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			require.NoError(t, r.Body.Close())
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/", origBody)
+		req.Header.Set("Content-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, origBody.closed, "original request body must be closed")
+	})
+
 	t.Run("passes through uncompressed inbound request body unchanged", func(t *testing.T) {
-		expectedBody := `{"id":"poll_count",
-		"type":"counter",
-		"delta":10,
-		}`
+		expectedBody := `{"id":"poll_count","type":"counter","delta":10}`
 
 		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, err := io.ReadAll(r.Body)
@@ -116,6 +160,26 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, htmlResponse, string(decompressed))
 	})
 
+	t.Run("removes Content-Length header when compressing response", func(t *testing.T) {
+		jsonResponse := `{"metric":"Alloc","val":123}`
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100") // Искусственный заголовок исходного размера
+			_, _ = w.Write([]byte(jsonResponse))
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, rec.Header().Get("Content-Length"), "Content-Length must be deleted on compression")
+	})
+
 	t.Run("compresses response when content-type has charset parameter", func(t *testing.T) {
 		jsonResponse := `{"metric":"Alloc"}`
 
@@ -164,7 +228,6 @@ func TestCompressMiddleware(t *testing.T) {
 		}))
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
-
 		rec := httptest.NewRecorder()
 
 		handler.ServeHTTP(rec, req)
@@ -213,5 +276,36 @@ func TestCompressMiddleware(t *testing.T) {
 
 		decompressed := gzipDecompress(t, rec.Body.Bytes())
 		assert.Equal(t, errorResponse, string(decompressed))
+	})
+
+	t.Run("handles bidirectional gzip cleanly and reuses pool objects", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
+			inbound, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, err = w.Write(append([]byte("echo: "), inbound...))
+			require.NoError(t, err)
+		}))
+
+		for i := 0; i < 3; i++ {
+			reqBody := `{"index":` + string(rune('0'+i)) + `}`
+			compressedReq := gzipCompress(t, []byte(reqBody))
+
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(compressedReq))
+			req.Header.Set("Content-Encoding", "gzip")
+			req.Header.Set("Accept-Encoding", "gzip")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusCreated, rec.Code)
+			assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+
+			decompressed := gzipDecompress(t, rec.Body.Bytes())
+			assert.Equal(t, "echo: "+reqBody, string(decompressed))
+		}
 	})
 }

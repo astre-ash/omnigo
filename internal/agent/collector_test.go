@@ -64,32 +64,61 @@ func TestCollector_PollAndMetrics(t *testing.T) {
 	assert.Equal(t, int64(2), *pollCountMetric.Delta, "PollCount must be 2 after second poll")
 }
 
-func TestCollector_ResetPollCount(t *testing.T) {
-	collector := NewCollector()
+func TestCollector_DecreasePollCount(t *testing.T) {
+	t.Run("decreases pollCount by delta correctly", func(t *testing.T) {
+		collector := NewCollector()
 
-	collector.Poll()
-	collector.Poll()
+		collector.Poll()
+		collector.Poll()
+		collector.Poll()
 
-	metrics := collector.GetMetrics()
-	pollCount, ok := findMetric(metrics, "PollCount")
-	require.True(t, ok)
-	require.NotNil(t, pollCount.Delta)
-	assert.Equal(t, int64(2), *pollCount.Delta)
+		metrics := collector.GetMetrics()
+		pollCount, ok := findMetric(metrics, "PollCount")
+		require.True(t, ok)
+		require.NotNil(t, pollCount.Delta)
+		assert.Equal(t, int64(3), *pollCount.Delta)
 
-	collector.ResetPollCount()
+		collector.DecreasePollCount(2)
 
-	metricsAfterReset := collector.GetMetrics()
-	pollCountReset, ok := findMetric(metricsAfterReset, "PollCount")
-	require.True(t, ok)
-	require.NotNil(t, pollCountReset.Delta)
-	assert.Equal(t, int64(0), *pollCountReset.Delta, "PollCount must be 0 after reset")
+		metricsAfterDecrease := collector.GetMetrics()
+		pollCountAfter, ok := findMetric(metricsAfterDecrease, "PollCount")
+		require.True(t, ok)
+		require.NotNil(t, pollCountAfter.Delta)
+		assert.Equal(t, int64(1), *pollCountAfter.Delta)
 
-	collector.Poll()
-	metricsAfterNewPoll := collector.GetMetrics()
-	pollCountNew, ok := findMetric(metricsAfterNewPoll, "PollCount")
-	require.True(t, ok)
-	require.NotNil(t, pollCountNew.Delta)
-	assert.Equal(t, int64(1), *pollCountNew.Delta, "PollCount must be 1 after poll following reset")
+		collector.Poll()
+		metricsAfterNewPoll := collector.GetMetrics()
+		pollCountNew, ok := findMetric(metricsAfterNewPoll, "PollCount")
+		require.True(t, ok)
+		require.NotNil(t, pollCountNew.Delta)
+		assert.Equal(t, int64(2), *pollCountNew.Delta)
+	})
+
+	t.Run("clamps to 0 when delta is greater than current pollCount", func(t *testing.T) {
+		collector := NewCollector()
+
+		collector.Poll()
+
+		collector.DecreasePollCount(5)
+
+		metrics := collector.GetMetrics()
+		pollCount, ok := findMetric(metrics, "PollCount")
+		require.True(t, ok)
+		require.NotNil(t, pollCount.Delta)
+		assert.Equal(t, int64(0), *pollCount.Delta, "PollCount must not be negative and should clamp to 0")
+	})
+
+	t.Run("clamps to 0 when decreasing from 0", func(t *testing.T) {
+		collector := NewCollector()
+
+		collector.DecreasePollCount(10)
+
+		metrics := collector.GetMetrics()
+		pollCount, ok := findMetric(metrics, "PollCount")
+		require.True(t, ok)
+		require.NotNil(t, pollCount.Delta)
+		assert.Equal(t, int64(0), *pollCount.Delta)
+	})
 }
 
 func TestCollector_Concurrency(t *testing.T) {
@@ -125,10 +154,16 @@ func TestCollector_Concurrency(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				collector.ResetPollCount()
+				collector.DecreasePollCount(1)
 			}
 		}()
 	}
 
 	wg.Wait()
+
+	metrics := collector.GetMetrics()
+	pollCount, ok := findMetric(metrics, "PollCount")
+	require.True(t, ok)
+	require.NotNil(t, pollCount.Delta)
+	assert.GreaterOrEqual(t, *pollCount.Delta, int64(0), "PollCount must be non-negative")
 }
