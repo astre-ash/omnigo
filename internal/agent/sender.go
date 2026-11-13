@@ -2,13 +2,19 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/astre-ash/omnigo/internal/domain"
+	"github.com/astre-ash/omnigo/pkg/retry"
 )
 
 type Compressor interface {
@@ -23,7 +29,7 @@ type MetricSender struct {
 
 func NewMetricSender(serverAddr string, compressor Compressor) *MetricSender {
 	return &MetricSender{
-		serverAddr: serverAddr,
+		serverAddr: strings.TrimRight(serverAddr, "/"),
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -31,60 +37,102 @@ func NewMetricSender(serverAddr string, compressor Compressor) *MetricSender {
 	}
 }
 
-func (s *MetricSender) Send(m domain.Metrics) error {
-	url := fmt.Sprintf("%s/update/", s.serverAddr)
-
-	data, err := json.Marshal(m)
-	if err != nil {
-		return fmt.Errorf("failed to marshal metric: %w", err)
+func (s *MetricSender) SendBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if len(metrics) == 0 {
+		return nil
 	}
 
-	var body io.Reader
-	isCompessed := false
+	payloadBytes, isCompressed, err := s.preparePayload(metrics)
+	if err != nil {
+		return fmt.Errorf("failed to prepare batch payload: %w", err)
+	}
+
+	return retry.Do(ctx, retry.DefaultDelays(), s.isRetryable, func() error {
+		return s.sendRequest(ctx, "/updates/", payloadBytes, isCompressed)
+	})
+}
+
+func (s *MetricSender) preparePayload(payload any) ([]byte, bool, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to marshal JSON: %w", err)
+	}
 
 	if s.compressor != nil {
 		compressedData, err := s.compressor.Compress(data)
 		if err != nil {
-			return fmt.Errorf("failed to compress metric payload: %w", err)
+			return nil, false, fmt.Errorf("failed to compress payload: %w", err)
 		}
-		body = bytes.NewReader(compressedData)
-		isCompessed = true
-	} else {
-		body = bytes.NewReader(data)
+		return compressedData, true, nil
 	}
 
-	req, err := http.NewRequest(http.MethodPost, url, body)
+	return data, false, nil
+}
+
+func (s *MetricSender) sendRequest(ctx context.Context, path string, bodyBytes []byte, isCompressed bool) error {
+	body := bytes.NewReader(bodyBytes)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverAddr+path, body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept-Encoding", "gzip")
-
-	if isCompessed {
+	if isCompressed {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	_, _ = io.Copy(io.Discard, resp.Body)
-
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		err := fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, strings.TrimSpace(string(respBody)))
+
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return &serverError{err: err}
+		}
+		return err
 	}
 
+	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
-func (s *MetricSender) SendAll(metrics []domain.Metrics) error {
-	for _, m := range metrics {
-		if err := s.Send(m); err != nil {
-			return fmt.Errorf("failed to send metric %s (%s): %w", m.ID, m.MType, err)
-		}
+type serverError struct {
+	err error
+}
+
+func (e *serverError) Error() string {
+	return e.err.Error()
+}
+
+func (s *MetricSender) isRetryable(err error) bool {
+	if err == nil {
+		return false
 	}
-	return nil
+
+	var srvErr *serverError
+	if errors.As(err, &srvErr) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+
+	return false
 }

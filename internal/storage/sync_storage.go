@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/astre-ash/omnigo/internal/domain"
@@ -13,7 +14,7 @@ type SnapshotWriter interface {
 
 type MemoryStorage interface {
 	service.Storage
-	Snapshot() []domain.Metrics
+	Snapshot(ctx context.Context) ([]domain.Metrics, error)
 }
 
 type SyncStorage struct {
@@ -28,24 +29,35 @@ func NewSyncStorage(mem MemoryStorage, fm SnapshotWriter) *SyncStorage {
 	}
 }
 
-func (s *SyncStorage) UpdateGauge(name string, value float64) error {
-	if err := s.MemoryStorage.UpdateGauge(name, value); err != nil {
+func (s *SyncStorage) UpdateGauge(ctx context.Context, name string, value float64) error {
+	if err := s.MemoryStorage.UpdateGauge(ctx, name, value); err != nil {
 		return err
 	}
-
-	if err := s.fileManager.Save(s.MemoryStorage.Snapshot()); err != nil {
-		return fmt.Errorf("failed to sync gauge to disk: %w", err)
-	}
-	return nil
+	return s.sync(ctx)
 }
 
-func (s *SyncStorage) UpdateCounter(name string, value int64) error {
-	if err := s.MemoryStorage.UpdateCounter(name, value); err != nil {
+func (s *SyncStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+	if err := s.MemoryStorage.UpdateCounter(ctx, name, value); err != nil {
 		return err
 	}
+	return s.sync(ctx)
+}
 
-	if err := s.fileManager.Save(s.MemoryStorage.Snapshot()); err != nil {
-		return fmt.Errorf("failed to sync counter to disk: %w", err)
+func (s *SyncStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
+	if err := s.MemoryStorage.UpdateBatch(ctx, metrics); err != nil {
+		return err
+	}
+	return s.sync(ctx)
+}
+
+func (s *SyncStorage) sync(ctx context.Context) error {
+	snapshot, err := s.MemoryStorage.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to make snapshot for sync: %w", err)
+	}
+
+	if err := s.fileManager.Save(snapshot); err != nil {
+		return fmt.Errorf("failed to sync metrics to disk: %w", err)
 	}
 	return nil
 }

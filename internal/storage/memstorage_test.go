@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -18,10 +19,12 @@ func TestNewMemStorage(t *testing.T) {
 }
 
 func TestMemStorage_Gauge(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("gauge not found", func(t *testing.T) {
 		s := NewMemStorage()
 
-		val, err := s.GetGauge("non_existent")
+		val, err := s.GetGauge(ctx, "non_existent")
 		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 		assert.Equal(t, 0.0, val)
 	})
@@ -30,24 +33,42 @@ func TestMemStorage_Gauge(t *testing.T) {
 		s := NewMemStorage()
 
 		// Initial write.
-		s.UpdateGauge("cpu_load", 12.34)
-		val, err := s.GetGauge("cpu_load")
+		err := s.UpdateGauge(ctx, "cpu_load", 12.34)
+		require.NoError(t, err)
+
+		val, err := s.GetGauge(ctx, "cpu_load")
 		require.NoError(t, err)
 		assert.Equal(t, 12.34, val)
 
 		// Value replacement.
-		s.UpdateGauge("cpu_load", 99.99)
-		val, err = s.GetGauge("cpu_load")
+		err = s.UpdateGauge(ctx, "cpu_load", 99.99)
+		require.NoError(t, err)
+
+		val, err = s.GetGauge(ctx, "cpu_load")
 		require.NoError(t, err)
 		assert.Equal(t, 99.99, val)
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.UpdateGauge(canceledCtx, "cpu_load", 10.0)
+		assert.ErrorIs(t, err, context.Canceled)
+
+		_, err = s.GetGauge(canceledCtx, "cpu_load")
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 
 func TestMemStorage_Counter(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("counter not found", func(t *testing.T) {
 		s := NewMemStorage()
 
-		val, err := s.GetCounter("non_existent")
+		val, err := s.GetCounter(ctx, "non_existent")
 		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 		assert.Equal(t, int64(0), val)
 	})
@@ -55,117 +76,201 @@ func TestMemStorage_Counter(t *testing.T) {
 	t.Run("counter accumulate", func(t *testing.T) {
 		s := NewMemStorage()
 
-		// First icrement.
-		s.UpdateCounter("page_views", 10)
-		val, err := s.GetCounter("page_views")
+		// First increment.
+		err := s.UpdateCounter(ctx, "page_views", 10)
+		require.NoError(t, err)
+
+		val, err := s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
 		assert.Equal(t, int64(10), val)
 
 		// Second increment (10 + 5 = 15).
-		s.UpdateCounter("page_views", 5)
-		val, err = s.GetCounter("page_views")
+		err = s.UpdateCounter(ctx, "page_views", 5)
+		require.NoError(t, err)
+
+		val, err = s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), val)
 
 		// Third increment (15 + 20 = 35).
-		s.UpdateCounter("page_views", 20)
-		val, err = s.GetCounter("page_views")
+		err = s.UpdateCounter(ctx, "page_views", 20)
+		require.NoError(t, err)
+
+		val, err = s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
 		assert.Equal(t, int64(35), val)
 	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.UpdateCounter(canceledCtx, "page_views", 5)
+		assert.ErrorIs(t, err, context.Canceled)
+
+		_, err = s.GetCounter(canceledCtx, "page_views")
+		assert.ErrorIs(t, err, context.Canceled)
+	})
 }
 
-func TestMemStorage_GetAllGauges(t *testing.T) {
+func TestMemStorage_GetAll(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("empty storage", func(t *testing.T) {
 		s := NewMemStorage()
 
-		gauges := s.GetAllGauges()
-		require.NotNil(t, gauges)
-		assert.Empty(t, gauges)
-	})
-
-	t.Run("returns all gauges", func(t *testing.T) {
-		s := NewMemStorage()
-
-		expected := map[string]float64{
-			"cpu_load": 12.34,
-			"ram_free": 1024.5,
-		}
-
-		for k, v := range expected {
-			s.UpdateGauge(k, v)
-		}
-
-		gauges := s.GetAllGauges()
-		assert.Equal(t, expected, gauges)
-	})
-
-	t.Run("returned map is an isolated copy", func(t *testing.T) {
-		s := NewMemStorage()
-
-		s.UpdateGauge("cpu_load", 12.34)
-
-		gauges := s.GetAllGauges()
-		gauges["cpu_load"] = 0.0
-		gauges["external_metric"] = 999.9
-
-		val, err := s.GetGauge("cpu_load")
+		gauges, counters, err := s.GetAll(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 12.34, val)
-
-		_, err = s.GetGauge("external_metric")
-		assert.ErrorIs(t, err, domain.ErrMetricNotFound, "external modifications should not affect storage")
-	})
-}
-
-func TestMemStorage_GetAllCounters(t *testing.T) {
-	t.Run("empty storage", func(t *testing.T) {
-		s := NewMemStorage()
-
-		counters := s.GetAllCounters()
-		require.NotNil(t, counters)
+		assert.NotNil(t, gauges)
+		assert.NotNil(t, counters)
+		assert.Empty(t, gauges)
 		assert.Empty(t, counters)
 	})
 
-	t.Run("returns all counters", func(t *testing.T) {
+	t.Run("returns all metrics", func(t *testing.T) {
 		s := NewMemStorage()
 
-		s.UpdateCounter("poll_count", 5)
-		s.UpdateCounter("poll_count", 5) // в сумме 10
-		s.UpdateCounter("requests", 42)
+		expectedGauges := map[string]float64{
+			"cpu_load": 12.34,
+			"ram_free": 1024.5,
+		}
+		for k, v := range expectedGauges {
+			require.NoError(t, s.UpdateGauge(ctx, k, v))
+		}
 
-		expected := map[string]int64{
+		expectedCounters := map[string]int64{
 			"poll_count": 10,
 			"requests":   42,
 		}
+		for k, v := range expectedCounters {
+			require.NoError(t, s.UpdateCounter(ctx, k, v))
+		}
 
-		counters := s.GetAllCounters()
-		assert.Equal(t, expected, counters)
+		gauges, counters, err := s.GetAll(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, expectedGauges, gauges)
+		assert.Equal(t, expectedCounters, counters)
 	})
 
-	t.Run("returned map is an isolated copy", func(t *testing.T) {
+	t.Run("returned maps are isolated copies", func(t *testing.T) {
 		s := NewMemStorage()
 
-		s.UpdateCounter("requests", 42)
+		require.NoError(t, s.UpdateGauge(ctx, "cpu_load", 12.34))
+		require.NoError(t, s.UpdateCounter(ctx, "requests", 42))
 
-		counters := s.GetAllCounters()
+		gauges, counters, err := s.GetAll(ctx)
+		require.NoError(t, err)
+
+		gauges["cpu_load"] = 0.0
+		gauges["external_metric"] = 999.9
+
 		counters["requests"] = 99999
 		counters["external_counter"] = 1
 
-		val, err := s.GetCounter("requests")
+		valG, err := s.GetGauge(ctx, "cpu_load")
 		require.NoError(t, err)
-		assert.Equal(t, int64(42), val)
+		assert.Equal(t, 12.34, valG)
 
-		_, err = s.GetCounter("external_counter")
-		assert.ErrorIs(t, err, domain.ErrMetricNotFound, "external modifications should not affect storage")
+		_, err = s.GetGauge(ctx, "external_metric")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
+
+		valC, err := s.GetCounter(ctx, "requests")
+		require.NoError(t, err)
+		assert.Equal(t, int64(42), valC)
+
+		_, err = s.GetCounter(ctx, "external_counter")
+		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		gauges, counters, err := s.GetAll(canceledCtx)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, gauges)
+		assert.Nil(t, counters)
+	})
+}
+
+func TestMemStorage_UpdateBatch(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("successfully applies batch with overwrite for gauge and accumulation for counter", func(t *testing.T) {
+		s := NewMemStorage()
+
+		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 10.0))
+		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 5))
+
+		batch := []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(25.5)},
+			{ID: "Sys", MType: domain.TypeGauge, Value: float64Ptr(100.0)},
+			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(10)},
+			{ID: "Requests", MType: domain.TypeCounter, Delta: int64Ptr(2)},
+		}
+
+		err := s.UpdateBatch(ctx, batch)
+		require.NoError(t, err)
+
+		// Assert gauge (overwrite).
+		alloc, err := s.GetGauge(ctx, "Alloc")
+		require.NoError(t, err)
+		assert.Equal(t, 25.5, alloc)
+
+		sys, err := s.GetGauge(ctx, "Sys")
+		require.NoError(t, err)
+		assert.Equal(t, 100.0, sys)
+
+		// Asserting counter (accumulation: 5 + 10 = 15).
+		poll, err := s.GetCounter(ctx, "PollCount")
+		require.NoError(t, err)
+		assert.Equal(t, int64(15), poll)
+
+		reqs, err := s.GetCounter(ctx, "Requests")
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), reqs)
+	})
+
+	t.Run("gracefully ignores metrics with nil pointers and unknown types", func(t *testing.T) {
+		s := NewMemStorage()
+
+		batch := []domain.Metrics{
+			{ID: "NilGauge", MType: domain.TypeGauge, Value: nil},
+			{ID: "NilCounter", MType: domain.TypeCounter, Delta: nil},
+			{ID: "UnknownType", MType: "unknown", Value: float64Ptr(10.0)},
+		}
+
+		err := s.UpdateBatch(ctx, batch)
+		require.NoError(t, err)
+
+		gauges, counters, err := s.GetAll(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, gauges)
+		assert.Empty(t, counters)
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.UpdateBatch(canceledCtx, []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(10.0)},
+		})
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 
 func TestMemStorage_Snapshot(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("empty storage returns empty slice", func(t *testing.T) {
 		s := NewMemStorage()
 
-		snapshot := s.Snapshot()
+		snapshot, err := s.Snapshot(ctx)
+		require.NoError(t, err)
 		require.NotNil(t, snapshot)
 		assert.Empty(t, snapshot)
 	})
@@ -173,10 +278,11 @@ func TestMemStorage_Snapshot(t *testing.T) {
 	t.Run("snapshot contains all metrics with isolated pointers", func(t *testing.T) {
 		s := NewMemStorage()
 
-		s.UpdateGauge("Alloc", 123.45)
-		s.UpdateCounter("PollCount", 10)
+		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 123.45))
+		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 10))
 
-		snapshot := s.Snapshot()
+		snapshot, err := s.Snapshot(ctx)
+		require.NoError(t, err)
 		require.Len(t, snapshot, 2)
 
 		// Assert gauge.
@@ -195,9 +301,21 @@ func TestMemStorage_Snapshot(t *testing.T) {
 		assert.Equal(t, int64(10), *pollMetric.Delta)
 		assert.Nil(t, pollMetric.Value)
 	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		snapshot, err := s.Snapshot(canceledCtx)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, snapshot)
+	})
 }
 
 func TestMemStorage_Restore(t *testing.T) {
+	ctx := context.Background()
+
 	t.Run("restore metrics into empty storage", func(t *testing.T) {
 		s := NewMemStorage()
 
@@ -206,37 +324,39 @@ func TestMemStorage_Restore(t *testing.T) {
 			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(42)},
 		}
 
-		s.Restore(metrics)
+		err := s.Restore(ctx, metrics)
+		require.NoError(t, err)
 
-		gaugeVal, err := s.GetGauge("Alloc")
+		gaugeVal, err := s.GetGauge(ctx, "Alloc")
 		require.NoError(t, err)
 		assert.Equal(t, 543.21, gaugeVal)
 
-		counterVal, err := s.GetCounter("PollCount")
+		counterVal, err := s.GetCounter(ctx, "PollCount")
 		require.NoError(t, err)
 		assert.Equal(t, int64(42), counterVal)
 	})
 
-	t.Run("restore overwrites existing metrics", func(t *testing.T) {
+	t.Run("restore overwrites existing metrics (counters are set, not accumulated)", func(t *testing.T) {
 		s := NewMemStorage()
 
-		s.UpdateGauge("Alloc", 100.0)
-		s.UpdateCounter("PollCount", 5)
+		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 100.0))
+		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 5))
 
 		metrics := []domain.Metrics{
 			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(200.0)},
 			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(25)},
 		}
 
-		s.Restore(metrics)
+		err := s.Restore(ctx, metrics)
+		require.NoError(t, err)
 
-		gaugeVal, err := s.GetGauge("Alloc")
+		gaugeVal, err := s.GetGauge(ctx, "Alloc")
 		require.NoError(t, err)
 		assert.Equal(t, 200.0, gaugeVal)
 
-		counterVal, err := s.GetCounter("PollCount")
+		counterVal, err := s.GetCounter(ctx, "PollCount")
 		require.NoError(t, err)
-		assert.Equal(t, int64(25), counterVal)
+		assert.Equal(t, int64(25), counterVal, "Restore must overwrite counter, not increment")
 	})
 
 	t.Run("ignores metrics with nil values and unknown types gracefully", func(t *testing.T) {
@@ -248,78 +368,120 @@ func TestMemStorage_Restore(t *testing.T) {
 			{ID: "Unknown", MType: "unknown_type", Value: float64Ptr(1.0)},
 		}
 
-		s.Restore(metrics)
+		err := s.Restore(ctx, metrics)
+		require.NoError(t, err)
 
-		_, err := s.GetGauge("NilGauge")
+		_, err = s.GetGauge(ctx, "NilGauge")
 		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 
-		_, err = s.GetCounter("NilCounter")
+		_, err = s.GetCounter(ctx, "NilCounter")
 		assert.ErrorIs(t, err, domain.ErrMetricNotFound)
 
-		assert.Empty(t, s.GetAllGauges())
-		assert.Empty(t, s.GetAllCounters())
+		gauges, counters, err := s.GetAll(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, gauges)
+		assert.Empty(t, counters)
+	})
+
+	t.Run("context canceled", func(t *testing.T) {
+		s := NewMemStorage()
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := s.Restore(canceledCtx, []domain.Metrics{
+			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(100.0)},
+		})
+		assert.ErrorIs(t, err, context.Canceled)
 	})
 }
 
 func TestMemStorage_SnapshotAndRestore_RoundTrip(t *testing.T) {
-	s1 := NewMemStorage()
-	s1.UpdateGauge("Alloc", 100.5)
-	s1.UpdateGauge("Sys", 200.0)
-	s1.UpdateCounter("PollCount", 15)
+	ctx := context.Background()
 
-	snapshot := s1.Snapshot()
+	s1 := NewMemStorage()
+	require.NoError(t, s1.UpdateGauge(ctx, "Alloc", 100.5))
+	require.NoError(t, s1.UpdateGauge(ctx, "Sys", 200.0))
+	require.NoError(t, s1.UpdateCounter(ctx, "PollCount", 15))
+
+	snapshot, err := s1.Snapshot(ctx)
+	require.NoError(t, err)
 
 	s2 := NewMemStorage()
-	s2.Restore(snapshot)
+	require.NoError(t, s2.Restore(ctx, snapshot))
 
-	assert.Equal(t, s1.GetAllGauges(), s2.GetAllGauges())
-	assert.Equal(t, s1.GetAllCounters(), s2.GetAllCounters())
+	gauges1, counters1, err := s1.GetAll(ctx)
+	require.NoError(t, err)
+
+	gauges2, counters2, err := s2.GetAll(ctx)
+	require.NoError(t, err)
+
+	assert.Equal(t, gauges1, gauges2)
+	assert.Equal(t, counters1, counters2)
 }
 
 func TestMemStorage_Concurrent(t *testing.T) {
+	ctx := context.Background()
 	s := NewMemStorage()
 
 	const (
 		goroutines = 50
-		iterations = 500
+		iterations = 200
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(goroutines * 3)
+	wg.Add(goroutines * 4)
 
+	// Goroutines updating counters.
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				s.UpdateCounter("requests", 1)
+				_ = s.UpdateCounter(ctx, "requests", 1)
 			}
 		}()
 	}
 
+	// Goroutines updating gauges and reading.
 	for i := 0; i < goroutines; i++ {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				s.UpdateGauge("temperature", float64(id+j))
-				_, _ = s.GetGauge("temperature")
-				_, _ = s.GetCounter("requests")
+				_ = s.UpdateGauge(ctx, "temperature", float64(id+j))
+				_, _ = s.GetGauge(ctx, "temperature")
+				_, _ = s.GetCounter(ctx, "requests")
 
-				if j%100 == 0 {
-					_ = s.GetAllGauges()
-					_ = s.GetAllCounters()
+				if j%50 == 0 {
+					_, _, _ = s.GetAll(ctx)
 				}
 			}
 		}(i)
 	}
 
+	// Goroutines using UpdateBatch.
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			v := 1.23
+			d := int64(1)
+			batch := []domain.Metrics{
+				{ID: "batch_gauge", MType: domain.TypeGauge, Value: &v},
+				{ID: "batch_counter", MType: domain.TypeCounter, Delta: &d},
+			}
+			for j := 0; j < iterations; j++ {
+				_ = s.UpdateBatch(ctx, batch)
+			}
+		}()
+	}
+
+	// Goroutines using Snapshot and Restore.
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				if j%50 == 0 {
-					snapshot := s.Snapshot()
-					if len(snapshot) > 0 {
-						s.Restore(snapshot[:1])
+				if j%20 == 0 {
+					snapshot, err := s.Snapshot(ctx)
+					if err == nil && len(snapshot) > 0 {
+						_ = s.Restore(ctx, snapshot[:1])
 					}
 				}
 			}
@@ -328,9 +490,13 @@ func TestMemStorage_Concurrent(t *testing.T) {
 
 	wg.Wait()
 
-	val, err := s.GetCounter("requests")
+	val, err := s.GetCounter(ctx, "requests")
 	require.NoError(t, err, "counter 'requests' must exist")
 	assert.Greater(t, val, int64(0))
+
+	batchCount, err := s.GetCounter(ctx, "batch_counter")
+	require.NoError(t, err)
+	assert.Greater(t, batchCount, int64(0))
 }
 
 func float64Ptr(v float64) *float64 {

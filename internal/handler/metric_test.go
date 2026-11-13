@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"github.com/astre-ash/omnigo/internal/domain"
 	"github.com/go-chi/chi/v5"
 )
+
+var _ MetricService = (*mockMetricService)(nil)
 
 type mockMetricService struct {
 	updateType   string
@@ -31,6 +34,7 @@ type mockMetricService struct {
 
 	allGauges   map[string]float64
 	allCounters map[string]int64
+	allErr      error
 
 	updateMetricReq    domain.Metrics
 	updateMetricRes    domain.Metrics
@@ -41,9 +45,13 @@ type mockMetricService struct {
 	getMetricRes    domain.Metrics
 	getMetricErr    error
 	getMetricCalled bool
+
+	updateMetricsReq    []domain.Metrics
+	updateMetricsCalled bool
+	updateMetricsErr    error
 }
 
-func (m *mockMetricService) Update(metricType, name, valueStr string) error {
+func (m *mockMetricService) Update(ctx context.Context, metricType, name, valueStr string) error {
 	m.updateType = metricType
 	m.updateName = name
 	m.updateVal = valueStr
@@ -51,27 +59,33 @@ func (m *mockMetricService) Update(metricType, name, valueStr string) error {
 	return m.updateErr
 }
 
-func (m *mockMetricService) Get(metricType, name string) (string, error) {
+func (m *mockMetricService) Get(ctx context.Context, metricType, name string) (string, error) {
 	m.getType = metricType
 	m.getName = name
 	m.getCalled = true
 	return m.getVal, m.getErr
 }
 
-func (m *mockMetricService) GetAll() (map[string]float64, map[string]int64) {
-	return m.allGauges, m.allCounters
+func (m *mockMetricService) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
+	return m.allGauges, m.allCounters, m.allErr
 }
 
-func (m *mockMetricService) UpdateMetric(req domain.Metrics) (domain.Metrics, error) {
+func (m *mockMetricService) UpdateMetric(ctx context.Context, req domain.Metrics) (domain.Metrics, error) {
 	m.updateMetricReq = req
 	m.updateMetricCalled = true
 	return m.updateMetricRes, m.updateMetricErr
 }
 
-func (m *mockMetricService) GetMetric(req domain.Metrics) (domain.Metrics, error) {
+func (m *mockMetricService) GetMetric(ctx context.Context, req domain.Metrics) (domain.Metrics, error) {
 	m.getMetricReq = req
 	m.getMetricCalled = true
 	return m.getMetricRes, m.getMetricErr
+}
+
+func (m *mockMetricService) UpdateMetrics(ctx context.Context, metrics []domain.Metrics) error {
+	m.updateMetricsReq = metrics
+	m.updateMetricsCalled = true
+	return m.updateMetricsErr
 }
 
 func setupTestRouter(h *MetricHandler) http.Handler {
@@ -85,6 +99,9 @@ func setupTestRouter(h *MetricHandler) http.Handler {
 	r.Post("/update", h.UpdateJSON)
 	r.Post("/value/", h.GetValueJSON)
 	r.Post("/value", h.GetValueJSON)
+
+	r.Post("/updates/", h.UpdatesJSON)
+	r.Post("/updates", h.UpdatesJSON)
 
 	return r
 }
@@ -281,6 +298,102 @@ func TestMetricHandler_GetValueJSON(t *testing.T) {
 	}
 }
 
+func TestMetricHandler_UpdatesJSON(t *testing.T) {
+	tests := []struct {
+		name           string
+		reqBody        string
+		serviceErr     error
+		expectedStatus int
+		validateMock   func(t *testing.T, m *mockMetricService)
+	}{
+		{
+			name:           "success: batch of metrics processed successfully",
+			reqBody:        `[{"id":"alloc","type":"gauge","value":100.5},{"id":"poll","type":"counter","delta":1}]`,
+			serviceErr:     nil,
+			expectedStatus: http.StatusOK,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.True(t, m.updateMetricsCalled)
+				require.Len(t, m.updateMetricsReq, 2)
+				assert.Equal(t, "alloc", m.updateMetricsReq[0].ID)
+				assert.Equal(t, "poll", m.updateMetricsReq[1].ID)
+			},
+		},
+		{
+			name:           "success: empty array returns 200 without calling service",
+			reqBody:        `[]`,
+			expectedStatus: http.StatusOK,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.False(t, m.updateMetricsCalled, "service must not be called on empty batch")
+			},
+		},
+		{
+			name:           "failure: invalid JSON body mapped to 400",
+			reqBody:        `[{"id":"alloc", "type": }]`,
+			expectedStatus: http.StatusBadRequest,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.False(t, m.updateMetricsCalled)
+			},
+		},
+		{
+			name:           "failure: single object instead of array mapped to 400",
+			reqBody:        `{"id":"alloc","type":"gauge","value":100.5}`,
+			expectedStatus: http.StatusBadRequest,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.False(t, m.updateMetricsCalled)
+			},
+		},
+		{
+			name:           "failure: validation error in service mapped to 400",
+			reqBody:        `[{"id":"alloc","type":"unknown"}]`,
+			serviceErr:     domain.ErrUnknownMetricType,
+			expectedStatus: http.StatusBadRequest,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.True(t, m.updateMetricsCalled)
+			},
+		},
+		{
+			name:           "failure: invalid value mapped to 400",
+			reqBody:        `[{"id":"alloc","type":"gauge"}]`,
+			serviceErr:     domain.ErrInvalidValue,
+			expectedStatus: http.StatusBadRequest,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.True(t, m.updateMetricsCalled)
+			},
+		},
+		{
+			name:           "failure: unexpected server error mapped to 500",
+			reqBody:        `[{"id":"alloc","type":"gauge","value":100.5}]`,
+			serviceErr:     errors.New("db conflict"),
+			expectedStatus: http.StatusInternalServerError,
+			validateMock: func(t *testing.T, m *mockMetricService) {
+				assert.True(t, m.updateMetricsCalled)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockMetricService{
+				updateMetricsErr: tt.serviceErr,
+			}
+			handler := NewMetricHandler(mock, zap.NewNop())
+			router := setupTestRouter(handler)
+
+			req := httptest.NewRequest(http.MethodPost, "/updates/", bytes.NewBufferString(tt.reqBody))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			router.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.expectedStatus, rec.Code)
+
+			if tt.validateMock != nil {
+				tt.validateMock(t, mock)
+			}
+		})
+	}
+}
+
 func TestMetricHandler_Update(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -401,24 +514,43 @@ func TestMetricHandler_GetValue(t *testing.T) {
 }
 
 func TestMetricHandler_GetAll(t *testing.T) {
-	mock := &mockMetricService{
-		allGauges:   map[string]float64{"alloc": 10.5},
-		allCounters: map[string]int64{"poll": 3},
-	}
+	t.Run("success: renders metrics template", func(t *testing.T) {
+		mock := &mockMetricService{
+			allGauges:   map[string]float64{"alloc": 10.5},
+			allCounters: map[string]int64{"poll": 3},
+		}
 
-	handler := NewMetricHandler(mock, zap.NewNop())
-	router := setupTestRouter(handler)
+		handler := NewMetricHandler(mock, zap.NewNop())
+		router := setupTestRouter(handler)
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
 
-	router.ServeHTTP(rec, req)
+		router.ServeHTTP(rec, req)
 
-	assert.Equal(t, http.StatusOK, rec.Code, "expected HTTP 200 OK")
-	assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
+		assert.Equal(t, http.StatusOK, rec.Code, "expected HTTP 200 OK")
+		assert.Equal(t, "text/html; charset=utf-8", rec.Header().Get("Content-Type"))
 
-	body := rec.Body.String()
-	require.NotEmpty(t, body, "HTML body must not be empty")
-	assert.Contains(t, body, "alloc", "HTML should contain gauge name")
-	assert.Contains(t, body, "poll", "HTML should contain counter name")
+		body := rec.Body.String()
+		require.NotEmpty(t, body, "HTML body must not be empty")
+		assert.Contains(t, body, "alloc", "HTML should contain gauge name")
+		assert.Contains(t, body, "poll", "HTML should contain counter name")
+	})
+
+	t.Run("failure: service returns error mapped to 500", func(t *testing.T) {
+		mock := &mockMetricService{
+			allErr: errors.New("failed to retrieve metrics"),
+		}
+
+		handler := NewMetricHandler(mock, zap.NewNop())
+		router := setupTestRouter(handler)
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Contains(t, rec.Body.String(), http.StatusText(http.StatusInternalServerError))
+	})
 }
