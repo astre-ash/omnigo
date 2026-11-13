@@ -68,18 +68,16 @@ func (s *Server) setupRoutes() http.Handler {
 
 	r.Get("/", s.metricH.GetAll)
 
-	r.Route("/update", func(r chi.Router) {
-		r.Post("/{type}/{name}/{value}", s.metricH.Update)
-		r.Post("/", s.metricH.UpdateJSON)
-	})
+	r.Post("/update/{type}/{name}/{value}", s.metricH.Update)
+	r.Post("/update", s.metricH.UpdateJSON)
+	r.Post("/update/", s.metricH.UpdateJSON)
 
-	r.Post("/updates/", s.metricH.UpdatesJSON)
 	r.Post("/updates", s.metricH.UpdatesJSON)
+	r.Post("/updates/", s.metricH.UpdatesJSON)
 
-	r.Route("/value", func(r chi.Router) {
-		r.Post("/", s.metricH.GetValueJSON)
-		r.Get("/{type}/{name}", s.metricH.GetValue)
-	})
+	r.Get("/value/{type}/{name}", s.metricH.GetValue)
+	r.Post("/value", s.metricH.GetValueJSON)
+	r.Post("/value/", s.metricH.GetValueJSON)
 
 	return r
 }

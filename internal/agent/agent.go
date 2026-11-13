@@ -52,6 +52,9 @@ func (a *Agent) Run(ctx context.Context) {
 }
 
 func (a *Agent) runPoller(ctx context.Context) {
+	// Cold start.
+	a.collector.Poll()
+
 	ticker := time.NewTicker(a.pollInterval)
 	defer ticker.Stop()
 

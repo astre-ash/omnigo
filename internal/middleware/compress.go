@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/astre-ash/omnigo/pkg/compress"
 )
@@ -12,12 +13,16 @@ import (
 type gzipReadCloser struct {
 	*gzip.Reader
 	orig io.ReadCloser
+	once sync.Once
 }
 
 func (gz *gzipReadCloser) Close() error {
-	err := gz.Reader.Close()
-	compress.PutReader(gz.Reader)
-	_ = gz.orig.Close()
+	var err error
+	gz.once.Do(func() {
+		err = gz.Reader.Close()
+		compress.PutReader(gz.Reader)
+		_ = gz.orig.Close()
+	})
 	return err
 }
 

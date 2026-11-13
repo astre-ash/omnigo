@@ -68,7 +68,9 @@ func initStorage(
 			return nil, nil, nil, fmt.Errorf("failed to init postgres: %w", err)
 		}
 
-		return pgStore, pgStore, pgStore.Close, nil
+		retryingStore := postgres.NewRetryingStorage(pgStore, logger)
+
+		return retryingStore, retryingStore, retryingStore.Close, nil
 	}
 
 	memStore := storage.NewMemStorage()

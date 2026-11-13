@@ -5,19 +5,56 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 )
 
+const (
+	upsertGaugeQuery = `
+		INSERT INTO metrics (id, type, value)
+		VALUES (@id, @type, @value)
+		ON CONFLICT (id, type)
+		DO UPDATE SET value = EXCLUDED.value;
+	`
+	upsertCounterQuery = `
+		INSERT INTO metrics (id, type, delta)
+		VALUES (@id, @type, @delta)
+		ON CONFLICT (id, type)
+		DO UPDATE SET delta = COALESCE(metrics.delta, 0) + EXCLUDED.delta;
+	`
+	selectGaugeQuery   = `SELECT value FROM metrics WHERE id = @name AND type = @type;`
+	selectCounterQuery = `SELECT delta FROM metrics WHERE id = @name AND type = @type;`
+	selectAllQuery     = `SELECT id, type, delta, value FROM metrics;`
+
+	rollbackTimeout = 5 * time.Second
+)
+
+type DBPool interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Ping(ctx context.Context) error
+	Close()
+}
+
+var _ DBPool = (*pgxpool.Pool)(nil)
+
 type Storage struct {
-	pool *pgxpool.Pool
+	pool DBPool
 }
 
 func New(ctx context.Context, dsn string, logger *zap.Logger) (*Storage, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	migrationDB, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open migration db connection: %w", err)
@@ -37,13 +74,24 @@ func New(ctx context.Context, dsn string, logger *zap.Logger) (*Storage, error) 
 		return nil, fmt.Errorf("unable to connect to database: %w", err)
 	}
 
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("unable to ping database: %w", err)
+	}
+
+	return NewWithPool(pool), nil
+}
+
+func NewWithPool(pool DBPool) *Storage {
 	return &Storage{
 		pool: pool,
-	}, nil
+	}
 }
 
 func (s *Storage) Close() {
-	s.pool.Close()
+	if s.pool != nil {
+		s.pool.Close()
+	}
 }
 
 func (s *Storage) Ping(ctx context.Context) error {
@@ -51,19 +99,11 @@ func (s *Storage) Ping(ctx context.Context) error {
 }
 
 func (s *Storage) UpdateGauge(ctx context.Context, name string, value float64) error {
-	query := `
-    INSERT INTO metrics (id, type, value)
-    VALUES (@id, @type, @value)
-    ON CONFLICT (id, type) 
-    DO UPDATE SET value = EXCLUDED.value;
-`
-
-	_, err := s.pool.Exec(ctx, query, pgx.NamedArgs{
+	_, err := s.pool.Exec(ctx, upsertGaugeQuery, pgx.NamedArgs{
 		"id":    name,
 		"type":  domain.TypeGauge,
 		"value": value,
 	})
-
 	if err != nil {
 		return fmt.Errorf("failed to update gauge %s: %w", name, err)
 	}
@@ -72,18 +112,11 @@ func (s *Storage) UpdateGauge(ctx context.Context, name string, value float64) e
 }
 
 func (s *Storage) UpdateCounter(ctx context.Context, name string, delta int64) error {
-	query := `
-		INSERT INTO metrics (id, type, delta)
-		VALUES (@id, @type, @delta)
-		ON CONFLICT (id, type) 
-		DO UPDATE SET delta = COALESCE(metrics.delta, 0) + EXCLUDED.delta;
-	`
-	_, err := s.pool.Exec(ctx, query, pgx.NamedArgs{
+	_, err := s.pool.Exec(ctx, upsertCounterQuery, pgx.NamedArgs{
 		"id":    name,
 		"type":  domain.TypeCounter,
 		"delta": delta,
 	})
-
 	if err != nil {
 		return fmt.Errorf("failed to update counter %s: %w", name, err)
 	}
@@ -92,20 +125,17 @@ func (s *Storage) UpdateCounter(ctx context.Context, name string, delta int64) e
 }
 
 func (s *Storage) GetGauge(ctx context.Context, name string) (float64, error) {
-	query := `SELECT value FROM metrics WHERE id = @name AND type = @type;`
-
 	var val *float64
 
-	err := s.pool.QueryRow(ctx, query, pgx.NamedArgs{
+	err := s.pool.QueryRow(ctx, selectGaugeQuery, pgx.NamedArgs{
 		"name": name,
 		"type": domain.TypeGauge,
 	}).Scan(&val)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, domain.ErrMetricNotFound
 		}
-		return 0, err
+		return 0, fmt.Errorf("failed to get gauge %s: %w", name, err)
 	}
 
 	if val == nil {
@@ -116,20 +146,17 @@ func (s *Storage) GetGauge(ctx context.Context, name string) (float64, error) {
 }
 
 func (s *Storage) GetCounter(ctx context.Context, name string) (int64, error) {
-	query := `SELECT delta FROM metrics WHERE id = @name AND type = @type;`
-
 	var delta *int64
 
-	err := s.pool.QueryRow(ctx, query, pgx.NamedArgs{
+	err := s.pool.QueryRow(ctx, selectCounterQuery, pgx.NamedArgs{
 		"name": name,
 		"type": domain.TypeCounter,
 	}).Scan(&delta)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, domain.ErrMetricNotFound
 		}
-		return 0, err
+		return 0, fmt.Errorf("failed to get counter %s: %w", name, err)
 	}
 
 	if delta == nil {
@@ -140,10 +167,9 @@ func (s *Storage) GetCounter(ctx context.Context, name string) (int64, error) {
 }
 
 func (s *Storage) GetAll(ctx context.Context) (map[string]float64, map[string]int64, error) {
-	query := `SELECT id, type, delta, value FROM metrics;`
-	rows, err := s.pool.Query(ctx, query)
+	rows, err := s.pool.Query(ctx, selectAllQuery)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to query metrics: %w", err)
 	}
 	defer rows.Close()
 
@@ -156,7 +182,7 @@ func (s *Storage) GetAll(ctx context.Context) (map[string]float64, map[string]in
 		var value *float64
 
 		if err := rows.Scan(&id, &mtype, &delta, &value); err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("failed to scan metric row: %w", err)
 		}
 
 		switch mtype {
@@ -172,7 +198,7 @@ func (s *Storage) GetAll(ctx context.Context) (map[string]float64, map[string]in
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("rows iteration failed: %w", err)
 	}
 
 	return gauges, counters, nil
@@ -183,52 +209,28 @@ func (s *Storage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) err
 		return nil
 	}
 
+	batch, err := buildMetricsBatch(metrics)
+	if err != nil {
+		return err
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+
+	var committed bool
 	defer func() {
-		_ = tx.Rollback(ctx)
-	}()
-
-	batch := &pgx.Batch{}
-
-	const gaugeQuery = `
-		INSERT INTO metrics (id, type, value)
-		VALUES (@id, @type, @value)
-		ON CONFLICT (id, type) 
-		DO UPDATE SET value = EXCLUDED.value;
-	`
-	const counterQuery = `
-		INSERT INTO metrics (id, type, delta)
-		VALUES (@id, @type, @delta)
-		ON CONFLICT (id, type) 
-		DO UPDATE SET delta = metrics.delta + EXCLUDED.delta;
-	`
-
-	var addedCount int
-	for _, m := range metrics {
-		switch m.MType {
-		case domain.TypeGauge:
-			batch.Queue(gaugeQuery, pgx.NamedArgs{
-				"id":    m.ID,
-				"type":  m.MType,
-				"value": *m.Value,
-			})
-			addedCount++
-		case domain.TypeCounter:
-			batch.Queue(counterQuery, pgx.NamedArgs{
-				"id":    m.ID,
-				"type":  m.MType,
-				"delta": *m.Delta,
-			})
-			addedCount++
+		if !committed {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+			defer cancel()
+			_ = tx.Rollback(rollbackCtx)
 		}
-	}
+	}()
 
 	br := tx.SendBatch(ctx, batch)
 
-	for i := 0; i < addedCount; i++ {
+	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
 			_ = br.Close()
 			return fmt.Errorf("failed to execute batch statement: %w", err)
@@ -243,5 +245,39 @@ func (s *Storage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) err
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
+	committed = true
 	return nil
+}
+
+func buildMetricsBatch(metrics []domain.Metrics) (*pgx.Batch, error) {
+	batch := &pgx.Batch{}
+
+	for _, m := range metrics {
+		switch m.MType {
+		case domain.TypeGauge:
+			if m.Value == nil {
+				return nil, fmt.Errorf("%w: gauge metric %q has nil value", domain.ErrInvalidValue, m.ID)
+			}
+			batch.Queue(upsertGaugeQuery, pgx.NamedArgs{
+				"id":    m.ID,
+				"type":  m.MType,
+				"value": *m.Value,
+			})
+
+		case domain.TypeCounter:
+			if m.Delta == nil {
+				return nil, fmt.Errorf("%w: counter metric %q has nil delta", domain.ErrInvalidValue, m.ID)
+			}
+			batch.Queue(upsertCounterQuery, pgx.NamedArgs{
+				"id":    m.ID,
+				"type":  m.MType,
+				"delta": *m.Delta,
+			})
+
+		default:
+			return nil, fmt.Errorf("%w: %q", domain.ErrUnknownMetricType, m.MType)
+		}
+	}
+
+	return batch, nil
 }

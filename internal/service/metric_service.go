@@ -1,9 +1,11 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/astre-ash/omnigo/internal/domain"
@@ -141,9 +143,69 @@ func (s *MetricService) UpdateMetrics(ctx context.Context, metrics []domain.Metr
 		}
 	}
 
-	if err := s.storage.UpdateBatch(ctx, metrics); err != nil {
+	compacted := compactAndSortMetrics(metrics)
+
+	if err := s.storage.UpdateBatch(ctx, compacted); err != nil {
 		return fmt.Errorf("failed to update metrics batch: %w", err)
 	}
 
 	return nil
+}
+
+func compactAndSortMetrics(metrics []domain.Metrics) []domain.Metrics {
+	type metricKey struct {
+		id    string
+		mtype string
+	}
+
+	grouped := make(map[metricKey]domain.Metrics, len(metrics))
+
+	for _, m := range metrics {
+		key := metricKey{id: m.ID, mtype: m.MType}
+
+		existing, ok := grouped[key]
+		if !ok {
+
+			entry := domain.Metrics{
+				ID:    m.ID,
+				MType: m.MType,
+			}
+			if m.Delta != nil {
+				d := *m.Delta
+				entry.Delta = &d
+			}
+			if m.Value != nil {
+				v := *m.Value
+				entry.Value = &v
+			}
+			grouped[key] = entry
+			continue
+		}
+
+		switch m.MType {
+		case domain.TypeCounter:
+			newDelta := *existing.Delta + *m.Delta
+			existing.Delta = &newDelta
+			grouped[key] = existing
+
+		case domain.TypeGauge:
+			newVal := *m.Value
+			existing.Value = &newVal
+			grouped[key] = existing
+		}
+	}
+
+	result := make([]domain.Metrics, 0, len(grouped))
+	for _, m := range grouped {
+		result = append(result, m)
+	}
+
+	slices.SortFunc(result, func(a, b domain.Metrics) int {
+		return cmp.Or(
+			cmp.Compare(a.ID, b.ID),
+			cmp.Compare(a.MType, b.MType),
+		)
+	})
+
+	return result
 }
