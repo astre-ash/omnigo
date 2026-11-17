@@ -13,7 +13,7 @@ import (
 
 type Storage interface {
 	UpdateGauge(ctx context.Context, name string, value float64) error
-	UpdateCounter(ctx context.Context, name string, value int64) error
+	UpdateCounter(ctx context.Context, name string, value int64) (int64, error)
 	GetGauge(ctx context.Context, name string) (float64, error)
 	GetCounter(ctx context.Context, name string) (int64, error)
 
@@ -68,13 +68,9 @@ func (s *MetricService) UpdateMetric(ctx context.Context, m domain.Metrics) (dom
 			return domain.Metrics{}, domain.ErrInvalidValue
 		}
 
-		if err := s.storage.UpdateCounter(ctx, m.ID, *m.Delta); err != nil {
-			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
-		}
-
-		actualVal, err := s.storage.GetCounter(ctx, m.ID)
+		actualVal, err := s.storage.UpdateCounter(ctx, m.ID, *m.Delta)
 		if err != nil {
-			return domain.Metrics{}, err
+			return domain.Metrics{}, fmt.Errorf("storage update failed: %w", err)
 		}
 
 		m.Delta = &actualVal
@@ -99,7 +95,10 @@ func (s *MetricService) Update(ctx context.Context, metricType, name, valueStr s
 		if err != nil {
 			return fmt.Errorf("%w: invalid counter value '%s'", domain.ErrInvalidValue, valueStr)
 		}
-		return s.storage.UpdateCounter(ctx, name, val)
+		if _, err := s.storage.UpdateCounter(ctx, name, val); err != nil {
+			return err
+		}
+		return nil
 
 	default:
 		return fmt.Errorf("%w: '%s'", domain.ErrUnknownMetricType, metricType)

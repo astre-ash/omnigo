@@ -31,15 +31,15 @@ func (s *MemStorage) UpdateGauge(ctx context.Context, name string, value float64
 	return nil
 }
 
-func (s *MemStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+func (s *MemStorage) UpdateCounter(ctx context.Context, name string, value int64) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
 	s.counters[name] += value
-	return nil
+	return s.counters[name], nil
 }
 
 func (s *MemStorage) GetGauge(ctx context.Context, name string) (float64, error) {

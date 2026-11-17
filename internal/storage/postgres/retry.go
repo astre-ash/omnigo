@@ -23,6 +23,10 @@ type RetryingStorage struct {
 }
 
 func NewRetryingStorage(base *Storage, logger *zap.Logger) *RetryingStorage {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	return &RetryingStorage{
 		base:   base,
 		delays: retry.DefaultDelays(),
@@ -46,10 +50,14 @@ func (r *RetryingStorage) UpdateGauge(ctx context.Context, name string, value fl
 	})
 }
 
-func (r *RetryingStorage) UpdateCounter(ctx context.Context, name string, delta int64) error {
-	return retry.Do(ctx, r.delays, r.isRetryable, func() error {
-		return r.base.UpdateCounter(ctx, name, delta)
+func (r *RetryingStorage) UpdateCounter(ctx context.Context, name string, delta int64) (int64, error) {
+	var newVal int64
+	err := retry.Do(ctx, r.delays, r.isRetryable, func() error {
+		var err error
+		newVal, err = r.base.UpdateCounter(ctx, name, delta)
+		return err
 	})
+	return newVal, err
 }
 
 func (r *RetryingStorage) GetGauge(ctx context.Context, name string) (float64, error) {
@@ -95,10 +103,14 @@ func (r *RetryingStorage) isRetryable(err error) bool {
 		return false
 	}
 
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
-		if pgerrcode.IsConnectionException(pgErr.Code) {
-			r.logger.Warn("retrying postgres query after connection exception",
+		if pgerrcode.IsConnectionException(pgErr.Code) || pgerrcode.IsTransactionRollback(pgErr.Code) {
+			r.logger.Warn("retrying postgres query after transient pg error",
 				zap.String("code", pgErr.Code),
 				zap.String("message", pgErr.Message),
 			)
@@ -110,12 +122,6 @@ func (r *RetryingStorage) isRetryable(err error) bool {
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		r.logger.Warn("retrying postgres query after network error", zap.Error(err))
-		return true
-	}
-
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		r.logger.Warn("retrying postgres query after net.OpError", zap.Error(err))
 		return true
 	}
 

@@ -30,12 +30,18 @@ type MetricHandler struct {
 	logger  *zap.Logger
 }
 
-func NewMetricHandler(s MetricService, l *zap.Logger) *MetricHandler {
+func NewMetricHandler(service MetricService, logger *zap.Logger) *MetricHandler {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	parsedTemplate := template.Must(template.New("metrics").Parse(htmlTemplate))
+
 	return &MetricHandler{
-		service: s,
+
+		service: service,
 		tmpl:    parsedTemplate,
-		logger:  l,
+		logger:  logger,
 	}
 }
 

@@ -58,6 +58,7 @@ type mockInMemStorage struct {
 	restoreErr      error
 
 	updateGaugeErr   error
+	updateCounterRes int64
 	updateCounterErr error
 	updateBatchErr   error
 	getGaugeVal      float64
@@ -103,11 +104,14 @@ func (m *mockInMemStorage) UpdateGauge(ctx context.Context, name string, value f
 	return m.updateGaugeErr
 }
 
-func (m *mockInMemStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+func (m *mockInMemStorage) UpdateCounter(ctx context.Context, name string, value int64) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
-	return m.updateCounterErr
+	if m.updateCounterErr != nil {
+		return 0, m.updateCounterErr
+	}
+	return m.updateCounterRes, nil
 }
 
 func (m *mockInMemStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
@@ -157,6 +161,18 @@ func TestNewPersistenceManager_Restore(t *testing.T) {
 		assert.Equal(t, 1, persister.loadCalls)
 		assert.Equal(t, 1, mem.restoreCalls)
 		assert.Equal(t, testMetrics, mem.restoredMetrics)
+	})
+
+	t.Run("does not panic when logger is nil", func(t *testing.T) {
+		persister := &mockPersister{loadRes: testMetrics}
+		mem := &mockInMemStorage{}
+
+		pm, activeStorage, err := NewPersistenceManager(ctx, mem, persister, 300*time.Second, true, nil)
+		require.NoError(t, err)
+		require.NotNil(t, pm)
+		assert.NotNil(t, pm.logger)
+		assert.Equal(t, mem, activeStorage)
+		assert.Equal(t, 1, mem.restoreCalls)
 	})
 
 	t.Run("returns error when mem.Restore fails", func(t *testing.T) {
@@ -397,6 +413,7 @@ func TestPersistenceManager_StartAsyncFlush(t *testing.T) {
 		}, 1*time.Second, 10*time.Millisecond, "expected async flush to trigger at least once")
 
 		cancel()
+		pm.wg.Wait()
 
 		currentCalls := persister.getSaveCalls()
 		time.Sleep(75 * time.Millisecond)

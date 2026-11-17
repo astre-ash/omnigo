@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 )
@@ -106,8 +107,26 @@ func cloneMetrics(metrics []domain.Metrics) []domain.Metrics {
 	return res
 }
 
+func TestNewAgent(t *testing.T) {
+	t.Run("defaults nil logger to nop logger without panicking", func(t *testing.T) {
+		collector := NewCollector()
+		collector.Poll()
+		mock := &mockSender{}
+
+		agent := NewAgent(time.Second, time.Second, collector, mock, nil)
+		require.NotNil(t, agent)
+		assert.NotNil(t, agent.logger)
+
+		assert.NotPanics(t, func() {
+			agent.report(context.Background())
+		})
+		assert.Len(t, mock.getBatches(), 1)
+	})
+}
+
 func TestAgent_report(t *testing.T) {
 	ctx := context.Background()
+	logger := zap.NewNop()
 
 	t.Run("decreases PollCount by reported delta after successful send", func(t *testing.T) {
 		collector := NewCollector()
@@ -116,7 +135,7 @@ func TestAgent_report(t *testing.T) {
 		collector.Poll()
 
 		mock := &mockSender{}
-		agent := NewAgent(time.Second, time.Second, collector, mock)
+		agent := NewAgent(time.Second, time.Second, collector, mock, logger)
 
 		agent.report(ctx)
 
@@ -146,7 +165,7 @@ func TestAgent_report(t *testing.T) {
 				return nil
 			},
 		}
-		agent := NewAgent(time.Second, time.Second, collector, mock)
+		agent := NewAgent(time.Second, time.Second, collector, mock, logger)
 
 		agent.report(ctx)
 
@@ -173,7 +192,7 @@ func TestAgent_report(t *testing.T) {
 		mock := &mockSender{
 			err: errors.New("network failure"),
 		}
-		agent := NewAgent(time.Second, time.Second, collector, mock)
+		agent := NewAgent(time.Second, time.Second, collector, mock, logger)
 
 		agent.report(ctx)
 
@@ -195,7 +214,7 @@ func TestAgent_Run_SuccessAndDecreasePollCount(t *testing.T) {
 	mock := &mockSender{
 		sentCh: make(chan struct{}, 10),
 	}
-	agent := NewAgent(pollInterval, reportInterval, collector, mock)
+	agent := NewAgent(pollInterval, reportInterval, collector, mock, zap.NewNop())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -246,7 +265,7 @@ func TestAgent_Run_SendFailureRetainsPollCount(t *testing.T) {
 		err:    errors.New("network failure: connection refused"),
 		sentCh: make(chan struct{}, 10),
 	}
-	agent := NewAgent(pollInterval, reportInterval, collector, mock)
+	agent := NewAgent(pollInterval, reportInterval, collector, mock, zap.NewNop())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -281,13 +300,15 @@ func TestAgent_Run_SendFailureRetainsPollCount(t *testing.T) {
 }
 
 func TestAgent_Run_GracefulShutdown(t *testing.T) {
+	logger := zap.NewNop()
+
 	t.Run("stops immediately when context is canceled before first report", func(t *testing.T) {
 		pollInterval := 1 * time.Second
 		reportInterval := 5 * time.Second
 
 		collector := NewCollector()
 		mock := &mockSender{}
-		agent := NewAgent(pollInterval, reportInterval, collector, mock)
+		agent := NewAgent(pollInterval, reportInterval, collector, mock, logger)
 
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -321,7 +342,7 @@ func TestAgent_Run_GracefulShutdown(t *testing.T) {
 				return nil
 			},
 		}
-		agent := NewAgent(5*time.Millisecond, 10*time.Millisecond, collector, mock)
+		agent := NewAgent(5*time.Millisecond, 10*time.Millisecond, collector, mock, logger)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})

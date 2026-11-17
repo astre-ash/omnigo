@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/url"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/astre-ash/omnigo/internal/domain"
 	"github.com/astre-ash/omnigo/pkg/retry"
+)
+
+const (
+	defaultClientTimeout = 5 * time.Second
+	endpointUpdateBatch  = "/updates/"
 )
 
 type Compressor interface {
@@ -23,16 +26,18 @@ type Compressor interface {
 
 type MetricSender struct {
 	serverAddr string
-	client     *http.Client
+	client     retry.HTTPDoer
 	compressor Compressor
 }
 
-func NewMetricSender(serverAddr string, compressor Compressor) *MetricSender {
+func NewMetricSender(serverAddr string, client retry.HTTPDoer, compressor Compressor) *MetricSender {
+	if client == nil {
+		client = &http.Client{Timeout: defaultClientTimeout}
+	}
+
 	return &MetricSender{
 		serverAddr: strings.TrimRight(serverAddr, "/"),
-		client: &http.Client{
-			Timeout: 5 * time.Second,
-		},
+		client:     client,
 		compressor: compressor,
 	}
 }
@@ -47,9 +52,7 @@ func (s *MetricSender) SendBatch(ctx context.Context, metrics []domain.Metrics) 
 		return fmt.Errorf("failed to prepare batch payload: %w", err)
 	}
 
-	return retry.Do(ctx, retry.DefaultDelays(), s.isRetryable, func() error {
-		return s.sendRequest(ctx, "/updates/", payloadBytes, isCompressed)
-	})
+	return s.sendRequest(ctx, endpointUpdateBatch, payloadBytes, isCompressed)
 }
 
 func (s *MetricSender) preparePayload(payload any) ([]byte, bool, error) {
@@ -70,9 +73,12 @@ func (s *MetricSender) preparePayload(payload any) ([]byte, bool, error) {
 }
 
 func (s *MetricSender) sendRequest(ctx context.Context, path string, bodyBytes []byte, isCompressed bool) error {
-	body := bytes.NewReader(bodyBytes)
+	targetUrl, err := url.JoinPath(s.serverAddr, path)
+	if err != nil {
+		return fmt.Errorf("failed to build request url: %w", err)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.serverAddr+path, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetUrl, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -90,49 +96,9 @@ func (s *MetricSender) sendRequest(ctx context.Context, path string, bodyBytes [
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		err := fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, strings.TrimSpace(string(respBody)))
-
-		if resp.StatusCode >= http.StatusInternalServerError {
-			return &serverError{err: err}
-		}
-		return err
+		return fmt.Errorf("unexpected status %d from %s: %s", resp.StatusCode, path, strings.TrimSpace(string(respBody)))
 	}
 
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
-}
-
-type serverError struct {
-	err error
-}
-
-func (e *serverError) Error() string {
-	return e.err.Error()
-}
-
-func (s *MetricSender) isRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var srvErr *serverError
-	if errors.As(err, &srvErr) {
-		return true
-	}
-
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-
-	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
-		return true
-	}
-
-	return false
 }

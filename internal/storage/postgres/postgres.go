@@ -26,7 +26,8 @@ const (
 		INSERT INTO metrics (id, type, delta)
 		VALUES (@id, @type, @delta)
 		ON CONFLICT (id, type)
-		DO UPDATE SET delta = COALESCE(metrics.delta, 0) + EXCLUDED.delta;
+		DO UPDATE SET delta = COALESCE(metrics.delta, 0) + EXCLUDED.delta
+		RETURNING delta;
 	`
 	selectGaugeQuery   = `SELECT value FROM metrics WHERE id = @name AND type = @type;`
 	selectCounterQuery = `SELECT delta FROM metrics WHERE id = @name AND type = @type;`
@@ -111,17 +112,20 @@ func (s *Storage) UpdateGauge(ctx context.Context, name string, value float64) e
 	return nil
 }
 
-func (s *Storage) UpdateCounter(ctx context.Context, name string, delta int64) error {
-	_, err := s.pool.Exec(ctx, upsertCounterQuery, pgx.NamedArgs{
+func (s *Storage) UpdateCounter(ctx context.Context, name string, delta int64) (int64, error) {
+	var newDelta int64
+
+	err := s.pool.QueryRow(ctx, upsertCounterQuery, pgx.NamedArgs{
 		"id":    name,
 		"type":  domain.TypeCounter,
 		"delta": delta,
-	})
+	}).Scan(&newDelta)
+
 	if err != nil {
-		return fmt.Errorf("failed to update counter %s: %w", name, err)
+		return 0, fmt.Errorf("failed to update counter %s: %w", name, err)
 	}
 
-	return nil
+	return newDelta, nil
 }
 
 func (s *Storage) GetGauge(ctx context.Context, name string) (float64, error) {

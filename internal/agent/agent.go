@@ -2,11 +2,11 @@ package agent
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
 	"github.com/astre-ash/omnigo/internal/domain"
+	"go.uber.org/zap"
 )
 
 type Sender interface {
@@ -19,19 +19,34 @@ type Agent struct {
 
 	collector *Collector
 	sender    Sender
+	logger    *zap.Logger
 }
 
-func NewAgent(pollInterval time.Duration, reportInterval time.Duration, collector *Collector, sender Sender) *Agent {
+func NewAgent(pollInterval time.Duration,
+	reportInterval time.Duration,
+	collector *Collector,
+	sender Sender,
+	logger *zap.Logger,
+) *Agent {
+
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	return &Agent{
 		pollInterval:   pollInterval,
 		reportInterval: reportInterval,
 		collector:      collector,
 		sender:         sender,
+		logger:         logger,
 	}
 }
 
 func (a *Agent) Run(ctx context.Context) {
-	log.Printf("agent started: poll interval %v, report interval %v", a.pollInterval, a.reportInterval)
+	a.logger.Info("agent started",
+		zap.Duration("poll_interval", a.pollInterval),
+		zap.Duration("report_interval", a.reportInterval),
+	)
 
 	var wg sync.WaitGroup
 
@@ -48,7 +63,7 @@ func (a *Agent) Run(ctx context.Context) {
 	}()
 
 	wg.Wait()
-	log.Println("agent stopped gracefully")
+	a.logger.Info("agent stopped gracefully")
 }
 
 func (a *Agent) runPoller(ctx context.Context) {
@@ -96,10 +111,10 @@ func (a *Agent) report(ctx context.Context) {
 		}
 	}
 
-	log.Printf("reporting %d metrics to server in batch...", len(metrics))
+	a.logger.Info("reporting metrics to server in batch", zap.Int("count", len(metrics)))
 
 	if err := a.sender.SendBatch(ctx, metrics); err != nil {
-		log.Printf("batch reporting failed: %v", err)
+		a.logger.Error("batch reporting failed", zap.Error(err))
 		return
 	}
 

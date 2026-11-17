@@ -94,16 +94,41 @@ func TestStorage_UpdateCounter(t *testing.T) {
 		require.NoError(t, err)
 		defer mock.Close()
 
-		mock.ExpectExec("INSERT INTO metrics").
+		rows := pgxmock.NewRows([]string{"delta"}).AddRow(int64(15))
+		mock.ExpectQuery("INSERT INTO metrics").
 			WithArgs(pgx.NamedArgs{
 				"id":    "PollCount",
 				"type":  domain.TypeCounter,
 				"delta": int64(5),
 			}).
-			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+			WillReturnRows(rows)
 
 		s := NewWithPool(mock)
-		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 5))
+		newDelta, err := s.UpdateCounter(ctx, "PollCount", 5)
+		require.NoError(t, err)
+		assert.Equal(t, int64(15), newDelta)
+		require.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("db error", func(t *testing.T) {
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err)
+		defer mock.Close()
+
+		errDB := errors.New("query row error")
+		mock.ExpectQuery("INSERT INTO metrics").
+			WithArgs(pgx.NamedArgs{
+				"id":    "PollCount",
+				"type":  domain.TypeCounter,
+				"delta": int64(5),
+			}).
+			WillReturnError(errDB)
+
+		s := NewWithPool(mock)
+		newDelta, err := s.UpdateCounter(ctx, "PollCount", 5)
+		require.ErrorIs(t, err, errDB)
+		assert.Equal(t, int64(0), newDelta)
+		assert.Contains(t, err.Error(), "failed to update counter PollCount")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 }

@@ -24,6 +24,7 @@ type mockMemoryStorage struct {
 	// UpdateCounter.
 	updateCounterName  string
 	updateCounterVal   int64
+	updateCounterRes   int64
 	updateCounterCalls int
 	updateCounterErr   error
 
@@ -57,14 +58,17 @@ func (m *mockMemoryStorage) UpdateGauge(ctx context.Context, name string, value 
 	return m.updateGaugeErr
 }
 
-func (m *mockMemoryStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+func (m *mockMemoryStorage) UpdateCounter(ctx context.Context, name string, value int64) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	m.updateCounterCalls++
 	m.updateCounterName = name
 	m.updateCounterVal = value
-	return m.updateCounterErr
+	if m.updateCounterErr != nil {
+		return 0, m.updateCounterErr
+	}
+	return m.updateCounterRes, nil
 }
 
 func (m *mockMemoryStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
@@ -219,18 +223,22 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 	errSnap := errors.New("snapshot error")
 	errDisk := errors.New("disk write failure")
 
-	delta := int64(10)
+	delta := int64(15)
 	expectedSnapshot := []domain.Metrics{
 		{ID: "PollCount", MType: domain.TypeCounter, Delta: &delta},
 	}
 
 	t.Run("success: updates memory, takes snapshot and saves to disk", func(t *testing.T) {
-		mem := &mockMemoryStorage{snapshotRes: expectedSnapshot}
+		mem := &mockMemoryStorage{
+			updateCounterRes: 15,
+			snapshotRes:      expectedSnapshot,
+		}
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter(ctx, "PollCount", 10)
+		newVal, err := s.UpdateCounter(ctx, "PollCount", 10)
 		require.NoError(t, err)
+		assert.Equal(t, int64(15), newVal)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
 		assert.Equal(t, "PollCount", mem.updateCounterName)
@@ -242,12 +250,16 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 	})
 
 	t.Run("failure: memory update fails, disk save not called", func(t *testing.T) {
-		mem := &mockMemoryStorage{updateCounterErr: errMem}
+		mem := &mockMemoryStorage{
+			updateCounterRes: 15,
+			updateCounterErr: errMem,
+		}
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter(ctx, "PollCount", 5)
+		newVal, err := s.UpdateCounter(ctx, "PollCount", 5)
 		require.ErrorIs(t, err, errMem)
+		assert.Equal(t, int64(0), newVal)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
 		assert.Equal(t, 0, mem.snapshotCalls)
@@ -255,14 +267,18 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 	})
 
 	t.Run("failure: snapshot creation fails", func(t *testing.T) {
-		mem := &mockMemoryStorage{snapshotErr: errSnap}
+		mem := &mockMemoryStorage{
+			updateCounterRes: 15,
+			snapshotErr:      errSnap,
+		}
 		writer := &mockSnapshotWriter{}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter(ctx, "PollCount", 10)
+		newVal, err := s.UpdateCounter(ctx, "PollCount", 10)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errSnap)
 		assert.Contains(t, err.Error(), "failed to make snapshot for sync")
+		assert.Equal(t, int64(15), newVal)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
 		assert.Equal(t, 1, mem.snapshotCalls)
@@ -270,14 +286,18 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 	})
 
 	t.Run("failure: disk save fails", func(t *testing.T) {
-		mem := &mockMemoryStorage{snapshotRes: expectedSnapshot}
+		mem := &mockMemoryStorage{
+			updateCounterRes: 15,
+			snapshotRes:      expectedSnapshot,
+		}
 		writer := &mockSnapshotWriter{saveErr: errDisk}
 		s := NewSyncStorage(mem, writer)
 
-		err := s.UpdateCounter(ctx, "PollCount", 10)
+		newVal, err := s.UpdateCounter(ctx, "PollCount", 10)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errDisk)
 		assert.Contains(t, err.Error(), "failed to sync metrics to disk")
+		assert.Equal(t, int64(15), newVal)
 
 		assert.Equal(t, 1, mem.updateCounterCalls)
 		assert.Equal(t, 1, mem.snapshotCalls)
@@ -292,8 +312,9 @@ func TestSyncStorage_UpdateCounter(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		err := s.UpdateCounter(canceledCtx, "PollCount", 5)
+		newVal, err := s.UpdateCounter(canceledCtx, "PollCount", 5)
 		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int64(0), newVal)
 		assert.Equal(t, 0, mem.updateCounterCalls)
 		assert.Equal(t, 0, writer.saveCalls)
 	})

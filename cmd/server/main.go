@@ -15,20 +15,37 @@ import (
 	"github.com/astre-ash/omnigo/internal/service"
 	"github.com/astre-ash/omnigo/internal/storage"
 	"github.com/astre-ash/omnigo/internal/storage/postgres"
+	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 )
 
+const fileFlushShutdownTimeout = 5 * time.Second
+
 func main() {
+	os.Exit(execute())
+}
+
+func execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx); err != nil {
-		log.Fatalf("application terminated with error: %v", err)
+	// После первого сигнала сбрасываем перехват, чтобы повторный Ctrl+C
+	// принудительно завершил процесс, если graceful shutdown зависнет.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
+	if err := run(ctx, os.Args[1:]); err != nil {
+		log.Printf("application terminated with error: %v", err)
+		return 1
 	}
+
+	return 0
 }
 
-func run(ctx context.Context) error {
-	cfg, err := config.LoadServerConfig(os.Args[1:])
+func run(ctx context.Context, args []string) error {
+	cfg, err := config.LoadServerConfig(args)
 	if err != nil {
 		return fmt.Errorf("failed to load server configuration: %w", err)
 	}
@@ -43,7 +60,9 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage: %w", err)
 	}
-	defer cleanup()
+	if cleanup != nil {
+		defer cleanup()
+	}
 
 	metricService := service.NewMetricService(store)
 	metricHandler := handler.NewMetricHandler(metricService, logger)
@@ -59,10 +78,16 @@ func initStorage(
 	ctx context.Context,
 	cfg *config.ServerConfig,
 	logger *zap.Logger,
-) (store service.Storage, pinger handler.Pinger, closeFunc func(), err error) {
-
+) (service.Storage, handler.Pinger, func(), error) {
 	if cfg.DatabaseDSN != "" {
-		logger.Info("using PostgreSQL as metrics storage", zap.String("dsn", cfg.DatabaseDSN))
+		if connCfg, err := pgx.ParseConfig(cfg.DatabaseDSN); err == nil {
+			logger.Info("using PostgreSQL as metrics storage",
+				zap.String("host", connCfg.Host),
+				zap.Uint16("port", connCfg.Port),
+				zap.String("database", connCfg.Database),
+			)
+		}
+
 		pgStore, err := postgres.New(ctx, cfg.DatabaseDSN, logger)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to init postgres: %w", err)
@@ -70,10 +95,11 @@ func initStorage(
 
 		retryingStore := postgres.NewRetryingStorage(pgStore, logger)
 
-		return retryingStore, retryingStore, retryingStore.Close, nil
+		return retryingStore, pgStore, retryingStore.Close, nil
 	}
 
 	memStore := storage.NewMemStorage()
+	noopPing := handler.NoopPinger{}
 
 	if cfg.FileStoragePath != "" {
 		logger.Info("using File Storage as persistent metrics store",
@@ -96,8 +122,8 @@ func initStorage(
 
 		pm.StartAsyncFlush(ctx)
 
-		closeFunc = func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeFunc := func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), fileFlushShutdownTimeout)
 			defer cancel()
 
 			if err := pm.Stop(shutdownCtx); err != nil {
@@ -105,9 +131,9 @@ func initStorage(
 			}
 		}
 
-		return persistenceStore, nil, closeFunc, nil
+		return persistenceStore, noopPing, closeFunc, nil
 	}
 
 	logger.Info("using in-memory storage only (no persistence)")
-	return memStore, nil, func() {}, nil
+	return memStore, noopPing, func() {}, nil
 }

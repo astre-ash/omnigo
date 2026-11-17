@@ -36,11 +36,12 @@ func (s *SyncStorage) UpdateGauge(ctx context.Context, name string, value float6
 	return s.sync(ctx)
 }
 
-func (s *SyncStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
-	if err := s.MemoryStorage.UpdateCounter(ctx, name, value); err != nil {
-		return err
+func (s *SyncStorage) UpdateCounter(ctx context.Context, name string, value int64) (int64, error) {
+	newVal, err := s.MemoryStorage.UpdateCounter(ctx, name, value)
+	if err != nil {
+		return 0, err
 	}
-	return s.sync(ctx)
+	return newVal, s.sync(ctx)
 }
 
 func (s *SyncStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {

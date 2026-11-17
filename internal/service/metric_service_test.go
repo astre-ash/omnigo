@@ -24,6 +24,7 @@ type mockStorage struct {
 	// Spy / Stub fields for UpdateCounter.
 	counterName      string
 	counterVal       int64
+	updateCounterRes int64
 	counterCalled    bool
 	updateCounterErr error
 
@@ -56,14 +57,17 @@ func (m *mockStorage) UpdateGauge(ctx context.Context, name string, value float6
 	return m.updateGaugeErr
 }
 
-func (m *mockStorage) UpdateCounter(ctx context.Context, name string, value int64) error {
+func (m *mockStorage) UpdateCounter(ctx context.Context, name string, value int64) (int64, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	m.counterName = name
 	m.counterVal = value
 	m.counterCalled = true
-	return m.updateCounterErr
+	if m.updateCounterErr != nil {
+		return 0, m.updateCounterErr
+	}
+	return m.updateCounterRes, nil
 }
 
 func (m *mockStorage) UpdateBatch(ctx context.Context, metrics []domain.Metrics) error {
@@ -124,7 +128,7 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 
 	t.Run("success: counter metric updated and returned accumulated value", func(t *testing.T) {
 		mock := &mockStorage{
-			getCounterVal: 15,
+			updateCounterRes: 15,
 		}
 		svc := NewMetricService(mock)
 
@@ -227,20 +231,6 @@ func TestMetricService_UpdateMetric(t *testing.T) {
 
 		assert.ErrorIs(t, err, errStorage)
 		assert.Contains(t, err.Error(), "storage update failed")
-	})
-
-	t.Run("failure: storage get error on counter after update", func(t *testing.T) {
-		mock := &mockStorage{getCounterErr: errors.New("read error")}
-		svc := NewMetricService(mock)
-
-		_, err := svc.UpdateMetric(ctx, domain.Metrics{
-			ID:    "pollCount",
-			MType: domain.TypeCounter,
-			Delta: int64Ptr(5),
-		})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "read error")
 	})
 
 	t.Run("failure: context canceled", func(t *testing.T) {

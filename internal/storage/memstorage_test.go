@@ -77,24 +77,27 @@ func TestMemStorage_Counter(t *testing.T) {
 		s := NewMemStorage()
 
 		// First increment.
-		err := s.UpdateCounter(ctx, "page_views", 10)
+		newVal, err := s.UpdateCounter(ctx, "page_views", 10)
 		require.NoError(t, err)
+		assert.Equal(t, int64(10), newVal)
 
 		val, err := s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
 		assert.Equal(t, int64(10), val)
 
 		// Second increment (10 + 5 = 15).
-		err = s.UpdateCounter(ctx, "page_views", 5)
+		newVal, err = s.UpdateCounter(ctx, "page_views", 5)
 		require.NoError(t, err)
+		assert.Equal(t, int64(15), newVal)
 
 		val, err = s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), val)
 
 		// Third increment (15 + 20 = 35).
-		err = s.UpdateCounter(ctx, "page_views", 20)
+		newVal, err = s.UpdateCounter(ctx, "page_views", 20)
 		require.NoError(t, err)
+		assert.Equal(t, int64(35), newVal)
 
 		val, err = s.GetCounter(ctx, "page_views")
 		require.NoError(t, err)
@@ -106,8 +109,9 @@ func TestMemStorage_Counter(t *testing.T) {
 		canceledCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		err := s.UpdateCounter(canceledCtx, "page_views", 5)
+		val, err := s.UpdateCounter(canceledCtx, "page_views", 5)
 		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int64(0), val)
 
 		_, err = s.GetCounter(canceledCtx, "page_views")
 		assert.ErrorIs(t, err, context.Canceled)
@@ -144,7 +148,8 @@ func TestMemStorage_GetAll(t *testing.T) {
 			"requests":   42,
 		}
 		for k, v := range expectedCounters {
-			require.NoError(t, s.UpdateCounter(ctx, k, v))
+			_, err := s.UpdateCounter(ctx, k, v)
+			require.NoError(t, err)
 		}
 
 		gauges, counters, err := s.GetAll(ctx)
@@ -157,7 +162,8 @@ func TestMemStorage_GetAll(t *testing.T) {
 		s := NewMemStorage()
 
 		require.NoError(t, s.UpdateGauge(ctx, "cpu_load", 12.34))
-		require.NoError(t, s.UpdateCounter(ctx, "requests", 42))
+		_, err := s.UpdateCounter(ctx, "requests", 42)
+		require.NoError(t, err)
 
 		gauges, counters, err := s.GetAll(ctx)
 		require.NoError(t, err)
@@ -202,7 +208,8 @@ func TestMemStorage_UpdateBatch(t *testing.T) {
 		s := NewMemStorage()
 
 		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 10.0))
-		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 5))
+		_, err := s.UpdateCounter(ctx, "PollCount", 5)
+		require.NoError(t, err)
 
 		batch := []domain.Metrics{
 			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(25.5)},
@@ -211,7 +218,7 @@ func TestMemStorage_UpdateBatch(t *testing.T) {
 			{ID: "Requests", MType: domain.TypeCounter, Delta: int64Ptr(2)},
 		}
 
-		err := s.UpdateBatch(ctx, batch)
+		err = s.UpdateBatch(ctx, batch)
 		require.NoError(t, err)
 
 		// Assert gauge (overwrite).
@@ -223,7 +230,7 @@ func TestMemStorage_UpdateBatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 100.0, sys)
 
-		// Asserting counter (accumulation: 5 + 10 = 15).
+		// Assert counter (accumulation: 5 + 10 = 15).
 		poll, err := s.GetCounter(ctx, "PollCount")
 		require.NoError(t, err)
 		assert.Equal(t, int64(15), poll)
@@ -279,7 +286,8 @@ func TestMemStorage_Snapshot(t *testing.T) {
 		s := NewMemStorage()
 
 		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 123.45))
-		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 10))
+		_, err := s.UpdateCounter(ctx, "PollCount", 10)
+		require.NoError(t, err)
 
 		snapshot, err := s.Snapshot(ctx)
 		require.NoError(t, err)
@@ -340,14 +348,15 @@ func TestMemStorage_Restore(t *testing.T) {
 		s := NewMemStorage()
 
 		require.NoError(t, s.UpdateGauge(ctx, "Alloc", 100.0))
-		require.NoError(t, s.UpdateCounter(ctx, "PollCount", 5))
+		_, err := s.UpdateCounter(ctx, "PollCount", 5)
+		require.NoError(t, err)
 
 		metrics := []domain.Metrics{
 			{ID: "Alloc", MType: domain.TypeGauge, Value: float64Ptr(200.0)},
 			{ID: "PollCount", MType: domain.TypeCounter, Delta: int64Ptr(25)},
 		}
 
-		err := s.Restore(ctx, metrics)
+		err = s.Restore(ctx, metrics)
 		require.NoError(t, err)
 
 		gaugeVal, err := s.GetGauge(ctx, "Alloc")
@@ -401,7 +410,8 @@ func TestMemStorage_SnapshotAndRestore_RoundTrip(t *testing.T) {
 	s1 := NewMemStorage()
 	require.NoError(t, s1.UpdateGauge(ctx, "Alloc", 100.5))
 	require.NoError(t, s1.UpdateGauge(ctx, "Sys", 200.0))
-	require.NoError(t, s1.UpdateCounter(ctx, "PollCount", 15))
+	_, err := s1.UpdateCounter(ctx, "PollCount", 15)
+	require.NoError(t, err)
 
 	snapshot, err := s1.Snapshot(ctx)
 	require.NoError(t, err)
@@ -436,7 +446,7 @@ func TestMemStorage_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < iterations; j++ {
-				_ = s.UpdateCounter(ctx, "requests", 1)
+				_, _ = s.UpdateCounter(ctx, "requests", 1)
 			}
 		}()
 	}

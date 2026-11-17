@@ -554,3 +554,17 @@ func TestMetricHandler_GetAll(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), http.StatusText(http.StatusInternalServerError))
 	})
 }
+
+func TestNewMetricHandler_NilLogger(t *testing.T) {
+	h := NewMetricHandler(&mockMetricService{}, nil)
+	require.NotNil(t, h)
+	assert.NotNil(t, h.logger)
+
+	req := httptest.NewRequest(http.MethodPost, "/update/", bytes.NewBufferString(`{bad-json}`))
+	rec := httptest.NewRecorder()
+
+	assert.NotPanics(t, func() {
+		h.UpdateJSON(rec, req)
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

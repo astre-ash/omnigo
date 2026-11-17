@@ -44,6 +44,9 @@ func NewPersistenceManager(
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 
 	pm := &PersistenceManager{
 		memStore:      mem,
