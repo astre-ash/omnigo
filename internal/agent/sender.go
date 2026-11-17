@@ -73,12 +73,12 @@ func (s *MetricSender) preparePayload(payload any) ([]byte, bool, error) {
 }
 
 func (s *MetricSender) sendRequest(ctx context.Context, path string, bodyBytes []byte, isCompressed bool) error {
-	targetUrl, err := url.JoinPath(s.serverAddr, path)
+	urlStr, err := url.JoinPath(s.serverAddr, path)
 	if err != nil {
 		return fmt.Errorf("failed to build request url: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetUrl, bytes.NewReader(bodyBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, urlStr, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
