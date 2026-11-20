@@ -70,11 +70,14 @@ func (c *Collector) GetMetrics() []domain.Metrics {
 	return metrics
 }
 
-func (c *Collector) ResetPollCount() {
+func (c *Collector) DecreasePollCount(delta int64) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
-	c.pollCount = 0
+	c.pollCount -= delta
+	if c.pollCount < 0 {
+		c.pollCount = 0
+	}
 }
 
 func gaugeMetric(name string, v float64) domain.Metrics {

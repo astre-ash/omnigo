@@ -3,13 +3,15 @@ package agent
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"sync"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,14 +58,54 @@ func (m *mockCompressor) Compress(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func TestMetricSender_Send(t *testing.T) {
-	t.Run("successful request with gzip compression, JSON body, and headers", func(t *testing.T) {
+type mockHTTPDoer struct {
+	doFn func(req *http.Request) (*http.Response, error)
+}
+
+func (m *mockHTTPDoer) Do(req *http.Request) (*http.Response, error) {
+	return m.doFn(req)
+}
+
+func TestNewMetricSender(t *testing.T) {
+	t.Run("trims trailing slashes and creates default http.Client when client is nil", func(t *testing.T) {
+		sender := NewMetricSender("http://localhost:8080///", nil, nil)
+
+		assert.Equal(t, "http://localhost:8080", sender.serverAddr)
+		httpClient, ok := sender.client.(*http.Client)
+		require.True(t, ok, "expected default client to be *http.Client")
+		assert.Equal(t, defaultClientTimeout, httpClient.Timeout)
+	})
+
+	t.Run("uses provided custom HTTPDoer client", func(t *testing.T) {
+		customClient := &mockHTTPDoer{}
+		sender := NewMetricSender("http://localhost:8080", customClient, nil)
+
+		assert.Same(t, customClient, sender.client)
+	})
+}
+
+func TestMetricSender_SendBatch(t *testing.T) {
+	ctx := context.Background()
+
+	testMetrics := []domain.Metrics{
+		{
+			ID:    "Alloc",
+			MType: domain.TypeGauge,
+			Value: float64Ptr(123.45),
+		},
+		{
+			ID:    "PollCount",
+			MType: domain.TypeCounter,
+			Delta: int64Ptr(10),
+		},
+	}
+
+	t.Run("successful batch request with gzip compression, JSON body, and headers", func(t *testing.T) {
 		var (
 			receivedMethod          string
 			receivedPath            string
 			receivedContentType     string
 			receivedContentEncoding string
-			receivedAcceptEncoding  string
 			decompressedBody        []byte
 		)
 
@@ -72,7 +114,6 @@ func TestMetricSender_Send(t *testing.T) {
 			receivedPath = r.URL.Path
 			receivedContentType = r.Header.Get("Content-Type")
 			receivedContentEncoding = r.Header.Get("Content-Encoding")
-			receivedAcceptEncoding = r.Header.Get("Accept-Encoding")
 
 			var err error
 			decompressedBody, err = decompressGzip(r.Body)
@@ -85,42 +126,36 @@ func TestMetricSender_Send(t *testing.T) {
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL, &mockCompressor{})
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(123.45),
-		}
+		sender := NewMetricSender(server.URL+"/", nil, &mockCompressor{})
 
-		err := sender.Send(metric)
+		err := sender.SendBatch(ctx, testMetrics)
 		require.NoError(t, err)
 
 		assert.Equal(t, http.MethodPost, receivedMethod)
-		assert.Equal(t, "/update/", receivedPath)
+		assert.Equal(t, "/updates/", receivedPath)
 		assert.Equal(t, "application/json", receivedContentType)
 		assert.Equal(t, "gzip", receivedContentEncoding)
-		assert.Equal(t, "gzip", receivedAcceptEncoding)
 
-		var actualMetric domain.Metrics
-		err = json.Unmarshal(decompressedBody, &actualMetric)
+		var actualMetrics []domain.Metrics
+		err = json.Unmarshal(decompressedBody, &actualMetrics)
 		require.NoError(t, err)
-		assert.Equal(t, metric, actualMetric)
+		assert.Equal(t, testMetrics, actualMetrics)
 	})
 
-	t.Run("successful request without compressor sends uncompressed body", func(t *testing.T) {
+	t.Run("successful batch request without compressor sends uncompressed body", func(t *testing.T) {
 		var (
 			receivedMethod          string
+			receivedPath            string
 			receivedContentType     string
 			receivedContentEncoding string
-			receivedAcceptEncoding  string
 			receivedBody            []byte
 		)
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			receivedMethod = r.Method
+			receivedPath = r.URL.Path
 			receivedContentType = r.Header.Get("Content-Type")
 			receivedContentEncoding = r.Header.Get("Content-Encoding")
-			receivedAcceptEncoding = r.Header.Get("Accept-Encoding")
 
 			var err error
 			receivedBody, err = io.ReadAll(r.Body)
@@ -132,25 +167,56 @@ func TestMetricSender_Send(t *testing.T) {
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL, nil)
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(42.0),
-		}
+		sender := NewMetricSender(server.URL, nil, nil)
 
-		err := sender.Send(metric)
+		err := sender.SendBatch(ctx, testMetrics)
 		require.NoError(t, err)
 
 		assert.Equal(t, http.MethodPost, receivedMethod)
+		assert.Equal(t, "/updates/", receivedPath)
 		assert.Equal(t, "application/json", receivedContentType)
 		assert.Empty(t, receivedContentEncoding, "Content-Encoding should not be set when compressor is nil")
-		assert.Equal(t, "gzip", receivedAcceptEncoding)
 
-		var actualMetric domain.Metrics
-		err = json.Unmarshal(receivedBody, &actualMetric)
+		var actualMetrics []domain.Metrics
+		err = json.Unmarshal(receivedBody, &actualMetrics)
 		require.NoError(t, err)
-		assert.Equal(t, metric, actualMetric)
+		assert.Equal(t, testMetrics, actualMetrics)
+	})
+
+	t.Run("delegates request execution to custom HTTPDoer", func(t *testing.T) {
+		var called atomic.Bool
+		customClient := &mockHTTPDoer{
+			doFn: func(req *http.Request) (*http.Response, error) {
+				called.Store(true)
+				assert.Equal(t, "http://example.com/updates/", req.URL.String())
+				assert.Equal(t, http.MethodPost, req.Method)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			},
+		}
+
+		sender := NewMetricSender("http://example.com", customClient, nil)
+
+		err := sender.SendBatch(ctx, testMetrics)
+		require.NoError(t, err)
+		assert.True(t, called.Load())
+	})
+
+	t.Run("empty or nil batch returns nil without sending HTTP request", func(t *testing.T) {
+		var serverCalled atomic.Bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			serverCalled.Store(true)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		sender := NewMetricSender(server.URL, nil, &mockCompressor{})
+
+		assert.NoError(t, sender.SendBatch(ctx, []domain.Metrics{}))
+		assert.NoError(t, sender.SendBatch(ctx, nil))
+		assert.False(t, serverCalled.Load(), "HTTP request must not be sent for empty metrics batch")
 	})
 
 	t.Run("returns error when compressor fails", func(t *testing.T) {
@@ -161,179 +227,130 @@ func TestMetricSender_Send(t *testing.T) {
 			},
 		}
 
-		sender := NewMetricSender("http://localhost:8080", compressor)
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(100),
-		}
+		sender := NewMetricSender("http://localhost:8080", nil, compressor)
 
-		err := sender.Send(metric)
+		err := sender.SendBatch(ctx, testMetrics)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errCompression)
-		assert.Contains(t, err.Error(), "failed to compress metric payload")
+		assert.Contains(t, err.Error(), "failed to prepare batch payload")
+		assert.Contains(t, err.Error(), "failed to compress payload")
 	})
 
 	t.Run("returns error when metric serialization fails", func(t *testing.T) {
-		sender := NewMetricSender("http://localhost:8080", &mockCompressor{})
+		sender := NewMetricSender("http://localhost:8080", nil, &mockCompressor{})
 		nanVal := math.NaN()
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: &nanVal,
+		invalidMetrics := []domain.Metrics{
+			{
+				ID:    "Alloc",
+				MType: domain.TypeGauge,
+				Value: &nanVal,
+			},
 		}
 
-		err := sender.Send(metric)
+		err := sender.SendBatch(ctx, invalidMetrics)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to marshal metric")
+		assert.Contains(t, err.Error(), "failed to prepare batch payload")
+		assert.Contains(t, err.Error(), "failed to marshal JSON")
 	})
 
-	t.Run("returns error when request creation fails", func(t *testing.T) {
-		sender := NewMetricSender("http://localhost\x7f:8080", nil)
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(100),
+	t.Run("returns error when URL building fails", func(t *testing.T) {
+		sender := NewMetricSender("http://localhost\x7f:8080", nil, nil)
+
+		err := sender.SendBatch(ctx, testMetrics)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to build request url")
+	})
+
+	t.Run("returns error on non-200 status without retries", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{name: "4xx status", status: http.StatusBadRequest, body: "invalid payload"},
+			{name: "5xx status", status: http.StatusInternalServerError, body: "internal failure"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var attempts atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					attempts.Add(1)
+					http.Error(w, tc.body, tc.status)
+				}))
+				defer server.Close()
+
+				sender := NewMetricSender(server.URL, nil, &mockCompressor{})
+
+				err := sender.SendBatch(ctx, testMetrics)
+				require.Error(t, err)
+				assert.Equal(t, int32(1), attempts.Load())
+				assert.Contains(t, err.Error(), tc.body)
+			})
 		}
-
-		err := sender.Send(metric)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to create request")
 	})
 
-	t.Run("returns error when server responds with non-200 status", func(t *testing.T) {
+	t.Run("returns error on canceled context without calling server", func(t *testing.T) {
+		var serverCalled atomic.Bool
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusBadRequest)
+			serverCalled.Store(true)
+			w.WriteHeader(http.StatusOK)
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL, &mockCompressor{})
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(100),
-		}
+		sender := NewMetricSender(server.URL, nil, &mockCompressor{})
 
-		err := sender.Send(metric)
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		err := sender.SendBatch(canceledCtx, testMetrics)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unexpected status code: 400")
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.False(t, serverCalled.Load())
 	})
+}
+
+func TestMetricSender_sendRequest(t *testing.T) {
+	ctx := context.Background()
 
 	t.Run("returns error when server is unreachable", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		server.Close()
 
-		sender := NewMetricSender(server.URL, &mockCompressor{})
-		metric := domain.Metrics{
-			ID:    "Alloc",
-			MType: "gauge",
-			Value: float64Ptr(100),
-		}
+		sender := NewMetricSender(server.URL, nil, nil)
 
-		err := sender.Send(metric)
+		err := sender.sendRequest(ctx, "/updates/", []byte(`[]`), false)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "request failed")
+		assert.Contains(t, err.Error(), "http request failed")
 	})
-}
 
-func TestMetricSender_SendAll(t *testing.T) {
-	t.Run("successful sending all metrics with gzip decompression", func(t *testing.T) {
-		var (
-			mtx             sync.Mutex
-			receivedMetrics []domain.Metrics
-			receivedPaths   []string
-		)
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mtx.Lock()
-			defer mtx.Unlock()
-
-			assert.Equal(t, "gzip", r.Header.Get("Content-Encoding"))
-			receivedPaths = append(receivedPaths, r.URL.Path)
-
-			decompressed, err := decompressGzip(r.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			var m domain.Metrics
-			if err := json.Unmarshal(decompressed, &m); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			receivedMetrics = append(receivedMetrics, m)
-
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer server.Close()
-
-		sender := NewMetricSender(server.URL, &mockCompressor{})
-		metrics := []domain.Metrics{
-			{
-				ID:    "Alloc",
-				MType: "gauge",
-				Value: float64Ptr(100.5),
-			},
-			{
-				ID:    "PollCount",
-				MType: "counter",
-				Delta: int64Ptr(1),
+	t.Run("returns wrapped error when HTTPDoer.Do fails", func(t *testing.T) {
+		errDo := errors.New("network timeout")
+		customClient := &mockHTTPDoer{
+			doFn: func(req *http.Request) (*http.Response, error) {
+				return nil, errDo
 			},
 		}
 
-		err := sender.SendAll(metrics)
-		require.NoError(t, err)
+		sender := NewMetricSender("http://localhost:8080", customClient, nil)
 
-		mtx.Lock()
-		defer mtx.Unlock()
-
-		require.Len(t, receivedMetrics, 2)
-		assert.Equal(t, []string{"/update/", "/update/"}, receivedPaths)
-		assert.Equal(t, metrics, receivedMetrics)
+		err := sender.sendRequest(ctx, "/updates/", []byte(`[]`), false)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errDo)
+		assert.Contains(t, err.Error(), "http request failed")
 	})
 
-	t.Run("aborts and returns error when a metric fails to send", func(t *testing.T) {
-		var (
-			mtx       sync.Mutex
-			callCount int
-		)
-
+	t.Run("limits error response body to 512 bytes", func(t *testing.T) {
+		longBody := strings.Repeat("x", 1024)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mtx.Lock()
-			callCount++
-			current := callCount
-			mtx.Unlock()
-
-			if current == 2 {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(longBody))
 		}))
 		defer server.Close()
 
-		sender := NewMetricSender(server.URL, &mockCompressor{})
-		metrics := []domain.Metrics{
-			{ID: "Alloc", MType: "gauge", Value: float64Ptr(100.5)},
-			{ID: "PollCount", MType: "counter", Delta: int64Ptr(1)},
-			{ID: "Frees", MType: "gauge", Value: float64Ptr(200.0)},
-		}
+		sender := NewMetricSender(server.URL, nil, nil)
 
-		err := sender.SendAll(metrics)
+		err := sender.sendRequest(ctx, "/updates/", []byte(`[]`), false)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to send metric PollCount (counter)")
-		assert.Contains(t, err.Error(), "unexpected status code: 500")
-
-		mtx.Lock()
-		assert.Equal(t, 2, callCount, "should stop sending immediately on first error")
-		mtx.Unlock()
-	})
-
-	t.Run("returns nil when metrics slice is empty or nil", func(t *testing.T) {
-		sender := NewMetricSender("http://localhost:8080", &mockCompressor{})
-
-		assert.NoError(t, sender.SendAll([]domain.Metrics{}))
-		assert.NoError(t, sender.SendAll(nil))
+		assert.Contains(t, err.Error(), "unexpected status 503 from /updates/: "+strings.Repeat("x", 512))
+		assert.NotContains(t, err.Error(), strings.Repeat("x", 513))
 	})
 }

@@ -13,10 +13,12 @@ const (
 	defaultAddress        = "127.0.0.1:8080"
 	defaultReportInterval = 10
 	defaultPollInterval   = 2
+	defaultClientTimeout  = 5 * time.Second
 )
 
 type SenderConfig struct {
-	Address string
+	Address       string
+	ClientTimeout time.Duration
 }
 
 type LoopConfig struct {
@@ -58,7 +60,7 @@ func LoadAgentConfig(args []string) (*AgentConfig, error) {
 	}
 
 	return &AgentConfig{
-		Sender: SenderConfig{Address: rawCfg.Address},
+		Sender: SenderConfig{Address: rawCfg.Address, ClientTimeout: defaultClientTimeout},
 		Loop: LoopConfig{
 			ReportInterval: time.Duration(rawCfg.ReportInterval) * time.Second,
 			PollInterval:   time.Duration(rawCfg.PollInterval) * time.Second,

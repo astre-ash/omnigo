@@ -1,38 +1,52 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/astre-ash/omnigo/internal/domain"
+	"github.com/astre-ash/omnigo/pkg/retry"
 )
 
 type FileManager struct {
 	filePath string
+	delays   []time.Duration
 }
 
 func NewFileManager(filePath string) *FileManager {
-	return &FileManager{filePath: filePath}
+	return &FileManager{
+		filePath: filePath,
+		delays:   retry.DefaultDelays(),
+	}
 }
 
 func (fm *FileManager) Save(snapshot []domain.Metrics) error {
+	return fm.SaveContext(context.Background(), snapshot)
+}
+
+func (fm *FileManager) SaveContext(ctx context.Context, snapshot []domain.Metrics) error {
 	if fm.filePath == "" {
 		return nil
 	}
 
+	return retry.Do(ctx, fm.delays, isFSRetryable, func() error {
+		return fm.saveAtomic(snapshot)
+	})
+}
+
+func (fm *FileManager) saveAtomic(snapshot []domain.Metrics) error {
 	dir := filepath.Dir(fm.filePath)
-	if dir != "" {
+	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory: %w", err)
 		}
-	}
-
-	data, err := json.MarshalIndent(snapshot, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
 	tmpFile, err := os.CreateTemp(dir, "metrics-*.tmp")
@@ -40,15 +54,21 @@ func (fm *FileManager) Save(snapshot []domain.Metrics) error {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	defer os.Remove(tmpFile.Name())
+	var success bool
+	defer func() {
+		if !success {
+			_ = tmpFile.Close()
+			_ = os.Remove(tmpFile.Name())
+		}
+	}()
 
-	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("failed to write data to temp file: %w", err)
+	enc := json.NewEncoder(tmpFile)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(snapshot); err != nil {
+		return fmt.Errorf("failed to encode metrics: %w", err)
 	}
 
 	if err := tmpFile.Sync(); err != nil {
-		tmpFile.Close()
 		return fmt.Errorf("failed to sync temp file: %w", err)
 	}
 
@@ -60,30 +80,66 @@ func (fm *FileManager) Save(snapshot []domain.Metrics) error {
 		return fmt.Errorf("failed to rename temp file to target: %w", err)
 	}
 
+	success = true
 	return nil
 }
 
 func (fm *FileManager) Load() ([]domain.Metrics, error) {
+	return fm.LoadContext(context.Background())
+}
+
+func (fm *FileManager) LoadContext(ctx context.Context) ([]domain.Metrics, error) {
 	if fm.filePath == "" {
 		return nil, nil
 	}
 
-	data, err := os.ReadFile(fm.filePath)
+	var metrics []domain.Metrics
+	err := retry.Do(ctx, fm.delays, isFSRetryable, func() error {
+		var err error
+		metrics, err = fm.loadStream()
+		return err
+	})
+
+	return metrics, err
+}
+
+func (fm *FileManager) loadStream() ([]domain.Metrics, error) {
+	file, err := os.Open(fm.filePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("failed to read storage file: %w", err)
+		return nil, fmt.Errorf("failed to open storage file: %w", err)
 	}
-
-	if len(data) == 0 {
-		return nil, nil
-	}
+	defer file.Close()
 
 	var metrics []domain.Metrics
-	if err := json.Unmarshal(data, &metrics); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal metrics JSON: %w", err)
+	if err := json.NewDecoder(file).Decode(&metrics); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to decode metrics JSON: %w", err)
 	}
 
 	return metrics, nil
+}
+
+func isFSRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, syscall.EBUSY) ||
+		errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.EINTR) ||
+		errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return isFSRetryable(pathErr.Err)
+	}
+
+	return false
 }
