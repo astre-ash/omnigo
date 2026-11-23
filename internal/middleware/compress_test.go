@@ -44,6 +44,27 @@ func (t *trackingReadCloser) Close() error {
 	return nil
 }
 
+type statusSpyResponseWriter struct {
+	header   http.Header
+	statuses []int
+	body     bytes.Buffer
+}
+
+func (s *statusSpyResponseWriter) Header() http.Header {
+	if s.header == nil {
+		s.header = make(http.Header)
+	}
+	return s.header
+}
+
+func (s *statusSpyResponseWriter) WriteHeader(statusCode int) {
+	s.statuses = append(s.statuses, statusCode)
+}
+
+func (s *statusSpyResponseWriter) Write(b []byte) (int, error) {
+	return s.body.Write(b)
+}
+
 func TestCompressMiddleware(t *testing.T) {
 	t.Run("decompresses inbound request body with gzip", func(t *testing.T) {
 		expectedBody := `{"id":"alloc","type":"gauge","value":42.5}`
@@ -143,9 +164,19 @@ func TestCompressMiddleware(t *testing.T) {
 				body:        `{"metric":"Alloc"}`,
 			},
 			{
+				name:        "case-insensitive application/json",
+				contentType: "Application/JSON ; charset=utf-8",
+				body:        `{"case":"insensitive"}`,
+			},
+			{
 				name:        "text/html",
 				contentType: "text/html",
 				body:        `<html><body><h1>Metrics</h1></body></html>`,
+			},
+			{
+				name:        "case-insensitive text/html",
+				contentType: "TEXT/HTML; charset=utf-8",
+				body:        `<html><body>OK</body></html>`,
 			},
 		}
 
@@ -165,6 +196,7 @@ func TestCompressMiddleware(t *testing.T) {
 
 				assert.Equal(t, http.StatusOK, rec.Code)
 				assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+				assert.Contains(t, rec.Header().Values("Vary"), "Accept-Encoding")
 
 				decompressed := gzipDecompress(t, rec.Body.Bytes())
 				assert.Equal(t, tt.body, string(decompressed))
@@ -249,7 +281,28 @@ func TestCompressMiddleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Empty(t, rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, rec.Header().Get("Vary"))
 		assert.Equal(t, jsonResponse, rec.Body.String())
+	})
+
+	t.Run("does not compress response for HEAD requests", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "15")
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodHead, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Empty(t, rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, rec.Header().Get("Vary"))
+		assert.Equal(t, "15", rec.Header().Get("Content-Length"))
+		assert.Empty(t, rec.Body.Bytes())
 	})
 
 	t.Run("does not compress response for unsupported content types", func(t *testing.T) {
@@ -271,8 +324,31 @@ func TestCompressMiddleware(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Empty(t, rec.Header().Get("Content-Encoding"))
+			assert.Empty(t, rec.Header().Get("Vary"))
 			assert.Equal(t, plainResponse, rec.Body.String())
 		}
+	})
+
+	t.Run("does not compress response when Content-Encoding is already set", func(t *testing.T) {
+		payload := "already-encoded-data"
+
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Encoding", "br")
+			_, err := w.Write([]byte(payload))
+			require.NoError(t, err)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "br", rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, rec.Header().Get("Vary"))
+		assert.Equal(t, payload, rec.Body.String())
 	})
 
 	t.Run("preserves non-200 HTTP status code and ignores duplicate WriteHeader calls", func(t *testing.T) {
@@ -298,10 +374,119 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, errorResponse, string(decompressed))
 	})
 
-	t.Run("flushes valid empty gzip stream when WriteHeader is called without Write", func(t *testing.T) {
+	t.Run("does not compress responses with status codes that forbid a body", func(t *testing.T) {
+		for _, status := range []int{http.StatusNoContent, http.StatusNotModified} {
+			t.Run(http.StatusText(status), func(t *testing.T) {
+				handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+				}))
+
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				req.Header.Set("Accept-Encoding", "gzip")
+				rec := httptest.NewRecorder()
+
+				handler.ServeHTTP(rec, req)
+
+				assert.Equal(t, status, rec.Code)
+				assert.Empty(t, rec.Header().Get("Content-Encoding"))
+				assert.Empty(t, rec.Header().Get("Vary"))
+				assert.Empty(t, rec.Body.Bytes())
+			})
+		}
+	})
+
+	t.Run("forwards 1xx informational statuses without preventing subsequent compression", func(t *testing.T) {
+		spy := &statusSpyResponseWriter{}
+
 		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusEarlyHints)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, err := w.Write([]byte(`{"early":"hints"}`))
+			require.NoError(t, err)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+
+		handler.ServeHTTP(spy, req)
+
+		assert.Equal(t, []int{http.StatusEarlyHints, http.StatusOK}, spy.statuses)
+		assert.Equal(t, "gzip", spy.Header().Get("Content-Encoding"))
+		assert.Equal(t, `{"early":"hints"}`, string(gzipDecompress(t, spy.body.Bytes())))
+	})
+
+	t.Run("does not compress empty response when WriteHeader is called without Write", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+		}))
+
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Empty(t, rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, rec.Header().Get("Vary"))
+		assert.Empty(t, rec.Body.Bytes())
+	})
+
+	t.Run("ignores empty Write before headers are sent", func(t *testing.T) {
+		t.Run("only empty Write does not trigger compression", func(t *testing.T) {
+			handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				n, err := w.Write([]byte{})
+				require.NoError(t, err)
+				assert.Equal(t, 0, n)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Empty(t, rec.Header().Get("Content-Encoding"))
+			assert.Empty(t, rec.Body.Bytes())
+		})
+
+		t.Run("empty Write followed by non-empty Write compresses normally", func(t *testing.T) {
+			handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte{})
+				require.NoError(t, err)
+				_, err = w.Write([]byte(`{"ok":true}`))
+				require.NoError(t, err)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Accept-Encoding", "gzip")
+			rec := httptest.NewRecorder()
+
+			handler.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+			assert.Equal(t, `{"ok":true}`, string(gzipDecompress(t, rec.Body.Bytes())))
+		})
+	})
+
+	t.Run("Flush initializes compression and flushes underlying ResponseWriter", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"chunk":1}`))
+			require.NoError(t, err)
+
+			rc := http.NewResponseController(w)
+			require.NoError(t, rc.Flush())
+
+			_, err = w.Write([]byte(`{"chunk":2}`))
+			require.NoError(t, err)
 		}))
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -311,10 +496,28 @@ func TestCompressMiddleware(t *testing.T) {
 		handler.ServeHTTP(rec, req)
 
 		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, rec.Flushed)
 		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+		assert.Equal(t, `{"chunk":1}{"chunk":2}`, string(gzipDecompress(t, rec.Body.Bytes())))
+	})
 
-		decompressed := gzipDecompress(t, rec.Body.Bytes())
-		assert.Empty(t, decompressed)
+	t.Run("Flush without Write still initializes headers and flushes empty gzip stream", func(t *testing.T) {
+		handler := Compress()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			rc := http.NewResponseController(w)
+			require.NoError(t, rc.Flush())
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+
+		handler.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, rec.Flushed)
+		assert.Equal(t, "gzip", rec.Header().Get("Content-Encoding"))
+		assert.Empty(t, gzipDecompress(t, rec.Body.Bytes()))
 	})
 
 	t.Run("combines multiple Write calls into a single valid gzip stream", func(t *testing.T) {

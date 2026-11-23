@@ -21,6 +21,7 @@ type ServerConfig struct {
 	FileStoragePath string        `env:"FILE_STORAGE_PATH"`
 	Restore         bool          `env:"RESTORE"`
 	DatabaseDSN     string        `env:"DATABASE_DSN"`
+	Key             string        `env:"KEY"`
 }
 
 func LoadServerConfig(args []string) (*ServerConfig, error) {
@@ -30,6 +31,7 @@ func LoadServerConfig(args []string) (*ServerConfig, error) {
 		FileStoragePath string `env:"FILE_STORAGE_PATH"`
 		Restore         bool   `env:"RESTORE"`
 		DatabaseDSN     string `env:"DATABASE_DSN"`
+		Key             string `env:"KEY"`
 	}
 
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
@@ -38,6 +40,7 @@ func LoadServerConfig(args []string) (*ServerConfig, error) {
 	fs.StringVar(&raw.FileStoragePath, "f", defaultFileStoragePath, "path to file for metrics storage")
 	fs.BoolVar(&raw.Restore, "r", defaultRestore, "restore previously saved values on startup")
 	fs.StringVar(&raw.DatabaseDSN, "d", "", "database DSN (e.g. postgres://user:password@localhost:5432/db)")
+	fs.StringVar(&raw.Key, "k", "", "secret key for HMAC-SHA256 signature verification")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("failed to parse server command-line flags: %w", err)
@@ -57,6 +60,7 @@ func LoadServerConfig(args []string) (*ServerConfig, error) {
 		FileStoragePath: raw.FileStoragePath,
 		Restore:         raw.Restore,
 		DatabaseDSN:     raw.DatabaseDSN,
+		Key:             raw.Key,
 	}
 
 	return cfg, nil
