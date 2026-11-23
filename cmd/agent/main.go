@@ -12,6 +12,7 @@ import (
 	"github.com/astre-ash/omnigo/internal/config"
 	"github.com/astre-ash/omnigo/pkg/compress"
 	"github.com/astre-ash/omnigo/pkg/retry"
+	"github.com/astre-ash/omnigo/pkg/signature"
 	"go.uber.org/zap"
 )
 
@@ -39,9 +40,19 @@ func run() error {
 		return fmt.Errorf("failed to load agent configuration: %w", err)
 	}
 
-	baseClient := &http.Client{
-		Timeout: cfg.Sender.ClientTimeout,
+	var transport http.RoundTripper = http.DefaultTransport
+	if cfg.Sender.Key != "" {
+		signer := signature.NewHMACSHA256(cfg.Sender.Key)
+		transport = signature.NewSigningRoundTripper(transport, signer)
 	}
+
+	logger.Info("request signing configured", zap.Bool("enabled", cfg.Sender.Key != ""))
+
+	baseClient := &http.Client{
+		Timeout:   cfg.Sender.ClientTimeout,
+		Transport: transport,
+	}
+
 	retryingClient := retry.NewHTTPClient(baseClient, retry.DefaultDelays(), logger)
 
 	collector := agent.NewCollector()

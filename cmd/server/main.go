@@ -11,10 +11,12 @@ import (
 
 	"github.com/astre-ash/omnigo/internal/config"
 	"github.com/astre-ash/omnigo/internal/handler"
+	"github.com/astre-ash/omnigo/internal/middleware"
 	"github.com/astre-ash/omnigo/internal/server"
 	"github.com/astre-ash/omnigo/internal/service"
 	"github.com/astre-ash/omnigo/internal/storage"
 	"github.com/astre-ash/omnigo/internal/storage/postgres"
+	"github.com/astre-ash/omnigo/pkg/signature"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
 )
@@ -29,8 +31,6 @@ func execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// После первого сигнала сбрасываем перехват, чтобы повторный Ctrl+C
-	// принудительно завершил процесс, если graceful shutdown зависнет.
 	go func() {
 		<-ctx.Done()
 		stop()
@@ -68,7 +68,13 @@ func run(ctx context.Context, args []string) error {
 	metricHandler := handler.NewMetricHandler(metricService, logger)
 	pingHandler := handler.NewPingHandler(pinger, logger)
 
-	srv := server.NewServer(cfg.Address, metricHandler, pingHandler, logger)
+	var signer middleware.SignVerifier
+	if cfg.Key != "" {
+		signer = signature.NewHMACSHA256(cfg.Key)
+	}
+	logger.Info("signature middleware configured", zap.Bool("enabled", signer != nil))
+
+	srv := server.NewServer(cfg.Address, metricHandler, pingHandler, signer, logger)
 
 	logger.Info("starting HTTP server", zap.String("addr", cfg.Address))
 	return srv.Run(ctx)
