@@ -31,7 +31,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize zap logger: %w", err)
 	}
-
 	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.LoadAgentConfig(os.Args[1:])
@@ -40,7 +39,10 @@ func run() error {
 		return fmt.Errorf("failed to load agent configuration: %w", err)
 	}
 
-	var transport http.RoundTripper = http.DefaultTransport
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport.MaxIdleConnsPerHost = max(cfg.Sender.RateLimit, 2)
+
+	var transport http.RoundTripper = baseTransport
 	if cfg.Sender.Key != "" {
 		signer := signature.NewHMACSHA256(cfg.Sender.Key)
 		transport = signature.NewSigningRoundTripper(transport, signer)
@@ -54,16 +56,20 @@ func run() error {
 	}
 
 	retryingClient := retry.NewHTTPClient(baseClient, retry.DefaultDelays(), logger)
-
-	collector := agent.NewCollector()
 	gz := compress.NewGzipCompressor()
 	sender := agent.NewMetricSender(cfg.Sender.Address, retryingClient, gz)
+
+	runtimeSource := agent.NewRuntimeSource()
+	systemSource := agent.NewSystemSource(agent.GopsutilReader{})
+
 	app := agent.NewAgent(
 		cfg.Loop.PollInterval,
 		cfg.Loop.ReportInterval,
-		collector,
+		cfg.Sender.RateLimit,
 		sender,
 		logger,
+		runtimeSource,
+		systemSource,
 	)
 
 	app.Run(ctx)
