@@ -12,6 +12,7 @@ import (
 	"github.com/astre-ash/omnigo/internal/config"
 	"github.com/astre-ash/omnigo/pkg/compress"
 	"github.com/astre-ash/omnigo/pkg/retry"
+	"github.com/astre-ash/omnigo/pkg/signature"
 	"go.uber.org/zap"
 )
 
@@ -30,7 +31,6 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize zap logger: %w", err)
 	}
-
 	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.LoadAgentConfig(os.Args[1:])
@@ -39,20 +39,37 @@ func run() error {
 		return fmt.Errorf("failed to load agent configuration: %w", err)
 	}
 
-	baseClient := &http.Client{
-		Timeout: cfg.Sender.ClientTimeout,
-	}
-	retryingClient := retry.NewHTTPClient(baseClient, retry.DefaultDelays(), logger)
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	baseTransport.MaxIdleConnsPerHost = max(cfg.Sender.RateLimit, 2)
 
-	collector := agent.NewCollector()
+	var transport http.RoundTripper = baseTransport
+	if cfg.Sender.Key != "" {
+		signer := signature.NewHMACSHA256(cfg.Sender.Key)
+		transport = signature.NewSigningRoundTripper(transport, signer)
+	}
+
+	logger.Info("request signing configured", zap.Bool("enabled", cfg.Sender.Key != ""))
+
+	baseClient := &http.Client{
+		Timeout:   cfg.Sender.ClientTimeout,
+		Transport: transport,
+	}
+
+	retryingClient := retry.NewHTTPClient(baseClient, retry.DefaultDelays(), logger)
 	gz := compress.NewGzipCompressor()
 	sender := agent.NewMetricSender(cfg.Sender.Address, retryingClient, gz)
+
+	runtimeSource := agent.NewRuntimeSource()
+	systemSource := agent.NewSystemSource(agent.GopsutilReader{})
+
 	app := agent.NewAgent(
 		cfg.Loop.PollInterval,
 		cfg.Loop.ReportInterval,
-		collector,
+		cfg.Sender.RateLimit,
 		sender,
 		logger,
+		runtimeSource,
+		systemSource,
 	)
 
 	app.Run(ctx)

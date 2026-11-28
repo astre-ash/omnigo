@@ -26,6 +26,8 @@ func TestLoadServerConfig(t *testing.T) {
 				StoreInterval:   defaultStoreInterval * time.Second,
 				FileStoragePath: defaultFileStoragePath,
 				Restore:         defaultRestore,
+				DatabaseDSN:     "",
+				Key:             "",
 			},
 			wantErr: false,
 		},
@@ -36,6 +38,8 @@ func TestLoadServerConfig(t *testing.T) {
 				"-i", "10",
 				"-f", "/custom/path/storage.json",
 				"-r=false",
+				"-d", "postgres://user:pass@localhost:5432/metrics",
+				"-k", "flag-secret-key",
 			},
 			envs: map[string]string{},
 			wantConfig: &ServerConfig{
@@ -43,6 +47,8 @@ func TestLoadServerConfig(t *testing.T) {
 				StoreInterval:   10 * time.Second,
 				FileStoragePath: "/custom/path/storage.json",
 				Restore:         false,
+				DatabaseDSN:     "postgres://user:pass@localhost:5432/metrics",
+				Key:             "flag-secret-key",
 			},
 			wantErr: false,
 		},
@@ -53,18 +59,41 @@ func TestLoadServerConfig(t *testing.T) {
 				"-i", "10",
 				"-f", "/flag/path.json",
 				"-r=true",
+				"-d", "postgres://flag:pass@localhost:5432/db",
+				"-k", "flag-secret",
 			},
 			envs: map[string]string{
 				"ADDRESS":           "127.0.0.1:7070",
 				"STORE_INTERVAL":    "60",
 				"FILE_STORAGE_PATH": "/env/path.json",
 				"RESTORE":           "false",
+				"DATABASE_DSN":      "postgres://env:pass@localhost:5432/db",
+				"KEY":               "env-secret",
 			},
 			wantConfig: &ServerConfig{
 				Address:         "127.0.0.1:7070",
 				StoreInterval:   60 * time.Second,
 				FileStoragePath: "/env/path.json",
 				Restore:         false,
+				DatabaseDSN:     "postgres://env:pass@localhost:5432/db",
+				Key:             "env-secret",
+			},
+			wantErr: false,
+		},
+		{
+			name: "environment variables set DatabaseDSN and Key without flags",
+			args: []string{},
+			envs: map[string]string{
+				"DATABASE_DSN": "postgres://user:pass@db:5432/app",
+				"KEY":          "hmac-key",
+			},
+			wantConfig: &ServerConfig{
+				Address:         defaultServerAddress,
+				StoreInterval:   defaultStoreInterval * time.Second,
+				FileStoragePath: defaultFileStoragePath,
+				Restore:         defaultRestore,
+				DatabaseDSN:     "postgres://user:pass@db:5432/app",
+				Key:             "hmac-key",
 			},
 			wantErr: false,
 		},
@@ -80,6 +109,8 @@ func TestLoadServerConfig(t *testing.T) {
 				StoreInterval:   0 * time.Second,
 				FileStoragePath: "",
 				Restore:         defaultRestore,
+				DatabaseDSN:     "",
+				Key:             "",
 			},
 			wantErr: false,
 		},
@@ -108,6 +139,14 @@ func TestLoadServerConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "failure: negative store interval in environment variable",
+			args: []string{},
+			envs: map[string]string{
+				"STORE_INTERVAL": "-1",
+			},
+			wantErr: true,
+		},
+		{
 			name: "failure: invalid integer in environment variable",
 			args: []string{},
 			envs: map[string]string{
@@ -127,7 +166,14 @@ func TestLoadServerConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			knownEnvs := []string{"ADDRESS", "STORE_INTERVAL", "FILE_STORAGE_PATH", "RESTORE"}
+			knownEnvs := []string{
+				"ADDRESS",
+				"STORE_INTERVAL",
+				"FILE_STORAGE_PATH",
+				"RESTORE",
+				"DATABASE_DSN",
+				"KEY",
+			}
 			for _, envKey := range knownEnvs {
 				if _, ok := tt.envs[envKey]; !ok {
 					if origVal, exists := os.LookupEnv(envKey); exists {

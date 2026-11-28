@@ -32,14 +32,16 @@ type Server struct {
 	httpServer *http.Server
 	metricH    MetricHandler
 	dbH        DBHandler
+	signer     appMiddleware.SignVerifier
 	logger     *zap.Logger
 }
 
-func NewServer(addr string, mh MetricHandler, dbh DBHandler, l *zap.Logger) *Server {
+func NewServer(addr string, mh MetricHandler, dbh DBHandler, signer appMiddleware.SignVerifier, l *zap.Logger) *Server {
 	s := &Server{
 		addr:    addr,
 		metricH: mh,
 		dbH:     dbh,
+		signer:  signer,
 		logger:  l,
 	}
 
@@ -59,6 +61,7 @@ func (s *Server) setupRoutes() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(appMiddleware.RequestLogger(s.logger))
+	r.Use(appMiddleware.Signature(s.signer))
 	r.Use(appMiddleware.Compress())
 	r.Use(chiMiddleware.Recoverer)
 
